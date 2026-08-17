@@ -1,0 +1,14 @@
+# InterSystems IRIS Python driver. Imports as `iris`, not `intersystems_irispython`.
+# Provides both the DB-API interface (iris.connect) and the Native API
+# (iris.createConnection / iris.createIRIS). Verified working on Python 3.9.6.
+intersystems-irispython==5.4.0
+
+# Analysis + presentation layer.
+pandas>=2.0            # 2.3.3 verified on Python 3.9.6
+matplotlib>=3.5
+
+# Notebook interface — the lowest-risk way to demo results.
+jupyterlab>=4.0
+
+# Keeps the IRIS host/port/credentials out of source files.
+python-dotenv>=1.0
