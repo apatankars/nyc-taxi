@@ -1,0 +1,17 @@
+.venv
+
+# The 105 MB trip CSV. Reproducible from the supplied data set, and too big to
+# belong in git history. taxi_zone_lookup(in).csv is already tracked, so this
+# pattern does not affect it — gitignore only applies to untracked files.
+data/*.csv
+
+# src/pure_python.py's parsed-frame cache: 175 MB, and derived data. It carries a
+# fingerprint so it invalidates itself; committing it would be committing an
+# answer instead of the code that produces one.
+data/trips_parsed.pkl
+
+.DS_Store
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.env

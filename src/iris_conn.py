@@ -9,6 +9,31 @@ access paths over the same stored data:
     connect()      DB-API 2.0 — SQL. This is what you want ~95% of the time.
     native()       Native API — direct global access and ObjectScript/Python
                    class-method calls. No SQL layer involved.
+
+Two IRIS behaviours that cost us time on this project, recorded here because this
+is the module every other file imports:
+
+1. TIMESTAMP columns come back in IRIS's internal format as soon as the query
+   plan has to collate them — ORDER BY, a range WHERE, or MIN()/MAX() over an
+   indexed column. A plain `SELECT pickup_ts` is fine; `SELECT MIN(pickup_ts)`
+   returns '1154152267907846976'. Nothing errors, the value is simply unreadable.
+
+       SELECT MIN(pickup_ts)              -> '1154152267907846976'
+       SELECT %EXTERNAL(MIN(pickup_ts))   -> '2008-12-31 22:41:41'
+       SELECT CAST(pickup_ts AS TIMESTAMP) -> datetime.datetime(...)   <- for pandas
+
+   Rule of thumb: if a timestamp is filtered, sorted or aggregated, wrap the
+   output in CAST(... AS TIMESTAMP). DATEPART()/DATEDIFF() return integers and
+   are unaffected.
+
+2. VARCHAR comparison and grouping default to SQLUPPER collation. Values are
+   stored with their original case, but GROUP BY returns them upper-cased and
+   `WHERE borough = 'manhattan'` matches 'Manhattan'. Use %EXACT() to group on
+   the stored case — MIN(borough) does *not* work, because aggregates collate
+   too.
+
+       SELECT borough FROM Taxi.Zone GROUP BY borough                  -> 'QUEENS'
+       SELECT %EXACT(borough) FROM Taxi.Zone GROUP BY %EXACT(borough)  -> 'Queens'
 """
 
 from contextlib import contextmanager

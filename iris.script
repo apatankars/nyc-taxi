@@ -15,6 +15,14 @@
     set prop("AutheEnabled")=48
     do ##class(Security.Services).Modify("%Service_CallIn",.prop)
 
+    ; Enable IRIS BI (DeepSee) on the /csp/user web application. The BI User Portal
+    ; and Analyzer are served from it, and without this flag they return HTTP 403
+    ; rather than any message explaining what is switched off.
+    ;   Portal: http://localhost:52773/csp/user/_DeepSee.UserPortal.Home.zen
+    do ##class(Security.Applications).Get("/csp/user",.webapp)
+    set webapp("DeepSeeEnabled")=1
+    do ##class(Security.Applications).Modify("/csp/user",.webapp)
+
     ; Give the project its own SQL schema. Schemas in IRIS are implicit — they
     ; spring into existence with the first table — so there is nothing to create
     ; here. Tables are created from Python in src/, keeping schema-as-code.

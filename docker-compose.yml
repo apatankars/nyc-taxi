@@ -5,13 +5,33 @@ services:
       dockerfile: Dockerfile
     container_name: nyc-taxi-iris
     restart: unless-stopped
+    environment:
+      # Durable %SYS. IRIS keeps its writable instance data (databases, CPF,
+      # security settings, journals) under this path instead of inside the
+      # container's own filesystem. Combined with the iris-durable volume below,
+      # that makes `docker compose down` non-destructive.
+      #
+      # Do NOT try to achieve this by mounting a volume straight onto
+      # /usr/irissys/mgr — that shadows the databases baked into the image and
+      # IRIS fails to start. Durable %SYS is the supported mechanism.
+      #
+      # Caveat worth knowing: the volume is populated from the image the FIRST
+      # time it is created. Later `--build`s do not reach into an existing
+      # volume, so a change to iris.script needs `docker compose down -v` to
+      # take effect — which also discards the loaded data.
+      - ISC_DATA_DIRECTORY=/durable/irissys
     ports:
       # host:container — pinned, so connection strings stay valid across restarts.
       - "1972:1972"     # superserver: Python DB-API / Native API / JDBC / ODBC
       - "52773:52773"   # web: Management Portal + REST
     volumes:
+      # Survives `docker compose down`, so a 787k-row load is done once.
+      - iris-durable:/durable
       # Read-only: IRIS only needs to *read* the CSVs for server-side LOAD DATA.
       # Inside the container these appear as /data/2023_Green_Taxi_Trip_Data.csv etc.
       - ./data:/data:ro
       # Writable scratch, for anything IRIS needs to export back out to you.
       - ./iris_out:/output
+
+volumes:
+  iris-durable:
