@@ -15,3 +15,6 @@ services:
       - ./data:/data:ro
       # Writable scratch, for anything IRIS needs to export back out to you.
       - ./iris_out:/output
+      # Pipeline code, run in-process by irispython. Read-only: IRIS executes it,
+      # you edit it on the host, no rebuild needed between runs.
+      - ./src:/src:ro

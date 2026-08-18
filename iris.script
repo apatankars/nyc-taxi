@@ -1,23 +1,16 @@
-    ; Run at image build time by the Dockerfile, via: iris session IRIS < iris.script
-    ; NOTE: lines must be indented. In ObjectScript an unindented line is a label,
-    ; not a command, so removing this leading whitespace breaks the script.
+// Dev-only bootstrap, applied at image build time.
+// Two jobs, both described in the Dockerfile: clear the expired-password flag
+// that blocks the first driver login, and enable the call-in service that the
+// Native API and Embedded Python rely on.
 
-    zn "%SYS"
+zn "%SYS"
 
-    ; Stop IRIS forcing a password change on first login. Development convenience
-    ; only — never do this on anything reachable from outside your machine.
-    do ##class(Security.Users).UnExpireUserPasswords("*")
+// Stock images ship _SYSTEM with the password flagged expired, which turns the
+// first DB-API connect into an auth failure instead of a session.
+do ##class(Security.Users).UnExpireUserPasswords("*")
 
-    ; Enable %Service_CallIn. Required by Embedded Python (irispython) and by the
-    ; Native API. Without it, iris.createIRIS() and irispython fail to connect.
-    do ##class(Security.Services).Get("%Service_CallIn",.prop)
-    set prop("Enabled")=1
-    set prop("AutheEnabled")=48
-    do ##class(Security.Services).Modify("%Service_CallIn",.prop)
+// %Service_CallIn is what lets irispython attach to the IRIS process.
+set props("Enabled") = 1
+do ##class(Security.Services).Modify("%Service_CallIn", .props)
 
-    ; Give the project its own SQL schema. Schemas in IRIS are implicit — they
-    ; spring into existence with the first table — so there is nothing to create
-    ; here. Tables are created from Python in src/, keeping schema-as-code.
-
-    zn "USER"
-    halt
+halt

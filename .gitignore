@@ -1,5 +1,6 @@
 data/
 .venv/
-.claude/
+iris_out/
+scrap/
 docs/
-data/
+

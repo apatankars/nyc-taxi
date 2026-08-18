@@ -8,10 +8,26 @@
 
 FROM intersystemsdc/iris-community:latest
 
-# Consumed by Embedded Python (irispython) so it can self-connect.
+# IRISNAMESPACE is the one that does work: it pins the namespace irispython starts
+# in, so the stages do not have to switch. Verified by setting it -- with
+# IRISNAMESPACE=%SYS, `iris.system.Process.NameSpace()` reports %SYS.
+#
+# The credentials are for `iris session` and the Management Portal, not for
+# irispython: Embedded Python runs as the instance and needs no login (irispython
+# starts fine with IRISUSERNAME set to a user that does not exist). They are kept
+# here because they are this dev image's credentials and this is where someone looks
+# for them.
 ENV IRISUSERNAME="_SYSTEM" \
     IRISPASSWORD="SYS" \
     IRISNAMESPACE="USER"
+
+# Flask, for the dashboard IRIS hosts itself as a WSGI application (stage 5).
+#
+# --target is the part that matters. Embedded Python does not use the system
+# site-packages; it looks in the instance's own python directory, which is already
+# on irispython's sys.path (see `irispython -c "import sys; print(sys.path)"`). A
+# plain `pip install flask` succeeds and the module is then invisible to IRIS.
+RUN pip install --no-cache-dir --target /usr/irissys/mgr/python flask
 
 COPY iris.script /tmp/iris.script
 
