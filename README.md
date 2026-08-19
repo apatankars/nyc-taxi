@@ -1,703 +1,1117 @@
-# NYC Green Taxi Trip Insights — Python + InterSystems IRIS
+# NYC Green Taxi 2023, on InterSystems IRIS
 
-A prototype that loads a full year of NYC green-taxi trips (787,060 rows) into
-InterSystems IRIS Community Edition, validates and enriches them, and serves the
-analysis through a Flask dashboard that IRIS itself hosts.
+Project B of the new-hire discovery project, built with Python and IRIS Community
+Edition. It loads the 2023 green-taxi trip file and the taxi-zone lookup into
+IRIS, enriches every trip with borough and zone names, flags questionable trips
+against fourteen rules, answers a set of analytical questions, and presents the
+whole thing through a small dashboard.
 
-The organising idea: **IRIS is the compute engine, not a file cabinet.** Every
-aggregate — GROUP BY, AVG, ordering, row limits, bitmask decoding, even the
-re-flagging loop — runs inside the database, and what crosses into Python is a
-finished table of tens of rows. The dashboard has a panel that measures exactly
-what that choice is worth ([Push-down](#the-stretch-goal-push-down-comparison)).
+**The dashboard is not the point.** The point of this exercise is to find out
+where a new developer trips over IRIS, and to write it down. So the largest
+section of this README is [the friction log](#the-friction-log) — twenty
+things that cost time, what the error actually said, why it happened, and what
+would have to change for the next cohort not to lose the same hours.
+
+Short version of what hurt: **three of the four hardest problems produced error
+messages that pointed nowhere near their cause**, and one produced no error at
+all.
 
 ---
 
-## Table of contents
+## Contents
 
 - [Quick start](#quick-start)
-- [The data model](#the-data-model-three-layers)
-- [Pipeline, stage by stage](#pipeline-stage-by-stage)
-  - [Stage 1 — schema](#stage-1--schema-stage1_schemapy)
-  - [Stage 2 — raw landing](#stage-2--raw-landing-stage2_load_rawpy)
-  - [Stage 3 — cast to typed](#stage-3--cast-to-typed-stage3_castpy)
-  - [Stage 4 — logical validation](#stage-4--logical-validation-stage4_flagpy)
-  - [Stage 5 — the application layer](#stage-5--the-application-layer-stage5_procspy-stage5_webpy)
-- [The flag policy](#the-flag-policy-the-part-that-changes-the-answers)
-- [User workflows](#user-workflows)
-- [The stretch goal: push-down comparison](#the-stretch-goal-push-down-comparison)
-- [How this maps to the project guide](#how-this-maps-to-the-project-guide)
-- [Where IRIS features are used](#where-iris-features-are-used)
-- [Running everything](#running-everything)
+- [What it does](#what-it-does)
+- [Architecture: who does what](#architecture-who-does-what)
+  - [The relevance model: which rows a figure may ignore](#the-relevance-model-which-rows-a-figure-may-ignore)
+- [The pipeline, stage by stage](#the-pipeline-stage-by-stage)
+- [The friction log](#the-friction-log)
+- [What worked well](#what-worked-well)
+- [Findings in the data](#findings-in-the-data)
+- [The stretch goal: IRIS SQL vs pandas vs Embedded Python](#the-stretch-goal-iris-sql-vs-pandas-vs-embedded-python)
+- [Recommendations for the next cohort](#recommendations-for-the-next-cohort)
+- [Known limitations](#known-limitations)
 - [File map](#file-map)
 
 ---
 
 ## Quick start
 
-```bash
-./run.sh
-```
-
-That is the whole thing. It starts IRIS Community Edition (superserver 1972, web
-52773), waits for it to accept SQL, runs every stage that needs running, and opens
-
-    http://localhost:52773/taxi/        sign in as _SYSTEM / SYS
-
-The first run builds from the CSVs and takes a few minutes. Re-running is cheap:
-stages 1–3 are skipped once `Taxi.Trip` is populated, because reloading 787,060
-rows to look at a dashboard is a waste of several minutes.
+Requires Docker and Python 3.9+.
 
 ```bash
-./run.sh                  # build if needed, then serve
-./run.sh --reload         # drop and rebuild everything from the CSVs
-./run.sh --reload 20000   # same, but only cast the first 20,000 raw rows
-./run.sh --flags          # re-apply the quality rules only, after editing rules.py
+# 1. Data. Both CSVs go in ./data (git-ignored).
+ls data/
+#   2023_Green_Taxi_Trip_Data.csv
+#   taxi_zone_lookup(in).csv
+
+# 2. IRIS. The image is built, not just pulled -- see friction #2 for why.
+docker compose up -d --build
+
+# 3. Python.
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+cp .env.example .env
+
+# 4. Check the connection before doing anything expensive.
+PYTHONPATH=src .venv/bin/python -m taxi.cli info
+
+# 5. Build everything: ~90 seconds from empty database to indexed tables.
+PYTHONPATH=src .venv/bin/python -m taxi.cli pipeline
+
+# 6. The dashboard.
+PYTHONPATH=src .venv/bin/python -m taxi.web      # http://127.0.0.1:8000
 ```
 
-Inside the container it is one script, and you can call it directly if the
-container is already up:
+Everything is also reachable from the CLI, which is what I actually used while
+building:
 
 ```bash
-docker exec -w /src nyc-taxi-iris /usr/irissys/bin/irispython run.py
+python -m taxi.cli info       # connection check and row counts
+python -m taxi.cli pipeline   # full rebuild
+python -m taxi.cli profile    # what is wrong with the raw file
+python -m taxi.cli quality    # re-apply the rules; --sample RULE, --derive-thresholds
+python -m taxi.cli analyze    # every analytical workflow, as text
+python -m taxi.cli bench      # IRIS SQL vs pandas vs Embedded Python
 ```
 
-Editing anything under `src/` needs **no** re-run — `taxi_app.py` reloads the
-project modules on the next request. Re-run only after changing the schema (stage
-1) or the web application's registration (`stage5_web.py`).
+### Ports
 
-Terminal-only alternative, no browser:
-
-```bash
-docker exec -w /src nyc-taxi-iris /usr/irissys/bin/irispython analytics.py
-```
-
-Front-end checks (macOS `jsc`, nothing to install):
-
-```bash
-tests/frontend/run.sh
-```
+`docker-compose.yml` maps **1973→1972** and **52774→52773**, not the defaults.
+I already had another IRIS container holding 1972, and the failure mode when two
+containers want the same port is a connection that appears to succeed against the
+wrong instance. Offsetting deliberately was cheaper than debugging that twice.
 
 ---
 
-## The data model: three layers
+## What it does
 
-Everything else follows from this shape, so it is worth reading first.
-
-| Table | Types | Purpose |
-|---|---|---|
-| `Taxi.TripRaw` | every column `VARCHAR(64)` | Landing zone. Nothing about the *content* of a row can make the load fail, because there is no declared type to violate. `'1,571.97'` lands as that exact string. |
-| `Taxi.Trip` | fully typed | The working table. Populated by casting `TripRaw`. Keeps **all** 787,060 rows — suspect trips are flagged, never deleted. |
-| `Taxi.TripFlag` | `(trip_id, rule_id)` | One row per (trip, violated rule). Normalised, bitmap-indexed on `rule_id`. |
-| `Taxi.TripQuality` | rule definitions | Each quality rule as *data*, including its SQL predicate as text. |
-| `Taxi.TripReject` | cast failures | Field, offending raw value, and reason — queryable, not logged and lost. |
-| `Taxi.Zone` | 265 rows | The taxi-zone lookup: borough, zone name, service zone. |
-| `Taxi.TripEnriched` | view | `Trip` LEFT JOINed to `Zone` twice, so pickup and drop-off carry borough/zone names. Every analytics query reads this, not `Trip`. |
-
-Two decisions here do most of the work:
-
-**Landing raw before typing.** A row rejected at the door is a row you can never
-report on — and reporting on questionable rows *is* the deliverable. Because the
-raw text survives in `TripRaw`, the dashboard's single-trip view can show a flagged
-value next to what the file literally said, and "what failed to parse, and why" is
-a SQL query rather than a lost log line.
-
-**Flagging instead of deleting.** The clean set is a predicate (`flag_count = 0`),
-not a separate table. The analytics workflow and the quality workflow therefore
-read the same table, one `WHERE` clause apart.
-
----
-
-## Pipeline, stage by stage
-
-`run.py` calls the stages in order. Each stage is its own module and can be re-run
-alone — stage 4 in particular is designed to be re-run whenever a threshold
-changes.
-
-```
-CSV ──LOAD DATA──▶ TripRaw ──cast──▶ Trip ──SQL predicates──▶ TripFlag ──▶ views / API / dashboard
-      (stage 2)     (VARCHAR)  (3)   (typed)      (4)        (+ flag_mask)         (5)
-        ▲
-   taxi_zone_lookup ──▶ Zone
-```
-
-### Stage 1 — schema (`stage1_schema.py`)
-
-**Purpose:** create the three layers from scratch, seed the rules table, and
-install the SQL helper functions. Idempotent: it drops everything first, so a
-re-run is a clean rebuild.
-
-**How it uses IRIS:**
-
-- **DDL through `iris.sql.exec`.** All `CREATE TABLE` / `CREATE INDEX` statements
-  are issued in-process.
-- **Verified drops.** A `DROP` can fail quietly — anything still holding an object
-  reference to `Taxi.Zone` pins it — and the next `CREATE` then reports "already
-  exists", which points at the wrong problem. The stage queries
-  `INFORMATION_SCHEMA.TABLES` afterwards and raises if a table survived.
-- **`DDLPKeyNotIDKey = 0`, temporarily.** This is the subtle one. `Trip.pu_location_id`
-  is typed as the class `Taxi.Zone`, not `INTEGER`, so it can be traversed with
-  arrow syntax (`pu_location_id->borough`). An object-reference column stores the
-  *RowID* of its target, so that only works if `Zone`'s RowID **is** its
-  `location_id`. By default a DDL primary key is a separate unique constraint and
-  IRIS assigns its own RowID. Flipping this instance-wide option to 0 for the
-  duration of the build makes `location_id` the IDKEY, so the reference is correct
-  by construction. The original value is restored in a `finally`.
-- **Bitmap indexes** on `TripFlag(rule_id)`, `Trip(flag_count)`, both location
-  columns, `pickup_hour` and `pickup_month`. Cheap over a 787k-row extent and they
-  are what make the clean-set filter and every rollup fast. A conventional index
-  goes on `pickup_ts`.
-- **`CREATE FUNCTION … LANGUAGE PYTHON`.** IRIS SQL has no bitwise operators
-  (`&`, `|` and `BITAND` all fail to parse), so `Trip.flag_mask` would be
-  unqueryable. `Taxi.mask_names(mask)` is a Python UDF that turns `34` into
-  `'distance_reformatted,fare_negative'`. It is **self-tested at build time** —
-  a UDF IRIS cannot invoke does not always raise; applied across a scan it can
-  return zero rows, which reads as "no trips matched" rather than "broken".
-- **`CREATE VIEW Taxi.TripEnriched`** — the enrichment the brief asks for. Two
-  notes earned the hard way: `%EXACT()` is required or string columns collate to
-  uppercase and `GROUP BY borough` yields `MANHATTAN`; and the view uses explicit
-  `LEFT JOIN` rather than arrow traversal, because two arrow hops into the same
-  table *inside a view definition* corrupt the view's cached metadata and make
-  every aggregate over it — even a bare `COUNT(*)` — fail with
-  `<UNDEFINED>isStatInvalid+2^%qTable`.
-
-**Rules as data.** `rules.py` holds the definitions; `seed()` writes them into
-`Taxi.TripQuality`. Each rule carries an explicit `bit_position` (declared, not
-derived from list order, so inserting a rule cannot renumber stored masks), a
-`phase`, a `severity`, and — for rule-phase rules — its SQL predicate as text.
-That text column is what makes "is 100 miles the right cutoff?" an `UPDATE` plus a
-re-run rather than a code change.
-
-### Stage 2 — raw landing (`stage2_load_raw.py`)
-
-**Purpose:** get both CSVs into IRIS with nothing lost or coerced.
-
-**How it uses IRIS:**
-
-- **`LOAD DATA FROM FILE`** for the 787k trip rows. IRIS streams the file into the
-  table server-side, so **no trip data crosses a process boundary** — the container
-  mounts `./data` read-only at `/data` and the database reads it directly.
-  `USING {"from":{"file":{"header":1}}}` tells the loader the first line is column
-  names. `LOAD DATA` pairs the file's header to the target table's columns **by
-  name**, which is why `TripRaw`'s columns reuse the CSV's names verbatim
-  (`db.RAW_COLUMNS`).
-- **`DELETE FROM Taxi.TripRaw` first.** `LOAD DATA` appends, so without this a
-  re-run would silently double the table.
-- **A verification query, not a hope:** it counts rows whose `trip_distance` still
-  contains a comma, confirming the pathological values arrived intact rather than
-  mangled.
-- **Zones go in through Python** instead — there are only 265, and the lookup
-  file's `Zone` column would force an awkward name match against `LOAD DATA`'s
-  header-pairing rule. Inserted with `?` parameter binding.
-
-### Stage 3 — cast to typed (`stage3_cast.py`)
-
-**Purpose:** `TripRaw` → `Trip`. **Only schema validation happens here:** can this
-text become the declared type? A failure means the value is unstorable, so the
-column becomes NULL and the reason lands in `TripReject`. No business opinion is
-applied — `-8.50` is a perfectly valid `NUMERIC` and passes straight through, to be
-judged by stage 4.
-
-Three observations can *only* be made at this stage, because they depend on the
-original text, which stops existing once it is typed:
-
-| Observation | Why it has to happen here |
-|---|---|
-| `distance_reformatted` | `'1,571.97'` arrived formatted for display. The separator is stripped to store it, but the fact is recorded — normalising silently would destroy the evidence linking the formatting to the absurd magnitude. |
-| `meter_metadata_missing` | Five fields (`passenger_count`, `RatecodeID`, `store_and_fwd_flag`, `payment_type`, `congestion_surcharge`) are absent *as a unit* — a feed lacking meter data. Recorded once per row, because that is a testable hypothesis; five separate NULLs say nothing. |
-| `cast_failed` | Something could not be coerced at all. |
-
-Nothing is imputed. Filling in a median would manufacture data and bury the most
-interesting structural fact in the file.
-
-**How it uses IRIS:**
-
-- **`iris.sql.prepare()` — prepare once, execute many.** The loader pushes 787,060
-  rows through a prepared `INSERT`, so the SQL is parsed once instead of per row.
-  This is embedded-only and `db.prepare()` says so loudly: the same pattern over
-  DB-API would be 787,060 round trips.
-- **`iris.tstart()` / `iris.tcommit()` / `iris.trollback()`, one transaction per
-  50,000-row chunk.** Without it every `INSERT` commits on its own and the journal
-  write dominates the runtime. A failure rolls the chunk back.
-- **Chunked reads by RowID** (`WHERE ID > ? AND ID <= ?`) rather than one giant
-  result set.
-- **`db.sql_params()`** translates Python `None` into `''`, which is what IRIS reads
-  as NULL for `INTEGER`, `NUMERIC`, `VARCHAR` and `TIMESTAMP` alike — neither
-  `iris.sql.exec` nor a prepared statement accepts `None`.
-
-**Derived columns** (`duration_min`, `implied_mph`, `pickup_hour`, `pickup_month`,
-`pickup_dow`) are computed here and *stored*, so the compound rules in stage 4 stay
-plain SQL predicates.
-
-**Timestamps are parsed in Python, deliberately.** The file is
-`MM/DD/YYYY hh:mm:ss AM/PM`, and AM/PM is the one silent-corruption risk in the
-dataset: get it wrong and every timestamp is still valid and storable, with half of
-them off by twelve hours, wrecking the entire hour-of-day analysis. Python's
-`%I`/`%p` is explicit and testable, and `self_test()` runs at the top of every
-execution asserting that `12:26 AM` → hour 0, `12:26 PM` → hour 12, `06:40 PM` →
-hour 18, plus the separator handling. A silent failure mode gets a loud guard.
-
-### Stage 4 — logical validation (`stage4_flag.py`)
-
-**Purpose:** the trip-quality workflow. Everything is typed now, so every rule is
-just a SQL predicate.
-
-**How it uses IRIS — this is the most set-based stage:**
-
-- **One `INSERT … SELECT` per rule**, built from the predicate text stored in
-  `Taxi.TripQuality`. No trip data crosses into Python: **the rule text goes in, a
-  count comes out.**
-- **`flag_count` and `flag_mask` denormalised back onto `Trip`** by two correlated
-  subqueries in a single `UPDATE`. Two representations of one truth:
-  `flag_count = 0` is a single bitmap-indexed predicate (the filter every analytics
-  query starts from), while `flag_mask` makes "which *combination* of rules" a
-  one-column question via `Taxi.mask_names`. `SUM(POWER(2, bit))` is a valid
-  bitwise OR here because `TripFlag`'s primary key guarantees a rule appears at most
-  once per trip, so no bit is double-counted.
-- **`TUNE TABLE`** on `Trip`, `TripFlag` and `Zone` — collecting optimiser
-  statistics is cheap here and every downstream aggregate benefits.
-- **The view is rebuilt after tuning, then verified in three shapes** by
-  `_verify_view()`: a row read (touches both reference columns), a `COUNT(*)`
-  checked against `Trip`'s own count (catches LEFT JOINs that duplicate or drop
-  rows), and a `GROUP BY` (what every workflow actually runs). They fail
-  independently — the `isStatInvalid` defect kills the aggregate while row reads
-  still work, so a single-row smoke test would have passed the whole time the
-  analytics were unrunnable.
-
-**Re-runnable by design.** Only `phase='rule'` flags are cleared and recomputed;
-`phase='ingest'` flags survive, because the raw text behind them no longer exists.
-That split is what lets an analyst change a threshold and re-run in seconds rather
-than reloading 787,060 rows.
-
-The 16 rules split by `severity`:
-
-- **`invalid`** — the value cannot describe a real trip: non-positive distance or
-  duration, pickup outside 2023, implied speed above 80 mph, a failed cast.
-- **`unusual`** — suspicious but possible: negative fares and totals (almost
-  certainly refunds or voids — *real business events*), fares above \$500, trips
-  over 100 miles or six hours, zero passengers, sub-1-mph crawls, over \$50 per
-  mile.
-
-That distinction matters because "unusual" rows are still evidence. Which brings
-us to the part of this project that changes the numbers most.
-
-### Stage 5 — the application layer (`stage5_procs.py`, `stage5_web.py`)
-
-`run.py` calls both as its last two steps; both are re-runnable on their own.
-
-**`stage5_procs.py` — `Taxi.apply_rules_now()`.** Stage 4's work is roughly forty
-statements. Driven from a client that is forty round trips. Wrapped in a
-`CREATE FUNCTION … LANGUAGE PYTHON`, it is **one call** that runs inside the IRIS
-process and returns a one-line summary, so re-flagging after editing a rule is
-`SELECT Taxi.apply_rules_now()` from anywhere that can issue SQL. The function body `import`s
-`stage4_flag` rather than restating it, so there is no second implementation to
-keep in step. It is a scalar *function* rather than a procedure because that is the
-form any SQL client can invoke and read a return value from with a plain `SELECT`;
-a procedure would need `CALL` plus driver-specific output handling. Like stage 1's
-UDF, it self-tests by calling itself once.
-
-**`stage5_web.py` — IRIS hosts the Flask app.** IRIS 2024.2+ can serve a WSGI
-application: point `Security.Applications` at a directory, module and callable and
-the private web server on 52773 serves it. The Flask handlers then run **inside the
-IRIS process under Embedded Python**, so `iris.sql.exec` in a request handler is an
-in-process call — an aggregate over 787,060 rows crosses the boundary as a few
-summary rows, with no DB-API connection and no per-query round trip.
-
-Four settings in there are non-obvious and each cost real time:
-
-| Property | Why |
-|---|---|
-| `DispatchClass = %SYS.Python.WSGI` | The setting the Management Portal fills in for you, and the reason a hand-built WSGI app 404s. Without it nothing answers — no error, just a 404. |
-| `ServeFiles = 0` | With the default, the CSP gateway claims every URL that *looks* like a static file and serves it from the application's physical path, which for a WSGI app is empty. Result: `/taxi/` and `/taxi/api/*` answer perfectly while the `.css` and `.js` 404 empty, so the page loads unstyled with no JavaScript and nothing in the log looks wrong. |
-| `Recurse = 1` | So `/taxi/api/...` reaches the app instead of 404ing at the gateway. |
-| `AutheEnabled = 32` | Password authentication only. No unauthenticated bit, no `MatchRoles` grant — every request runs as the logged-in user with exactly that user's privileges on `Taxi.*`, which is what bounds every query the dashboard issues. |
-
-The stage runs `SetNamespace("%SYS")` for the `Security.Applications` calls and puts
-the namespace back in a `finally` — leaving the process in `%SYS` would make every
-later `Taxi.*` query fail with "table not found".
-
-**`WSGIDebug = 1` is not enough on its own,** which is the fifth thing that cost
-real time. It re-imports `taxi_app.py` when that file changes — but not the modules
-`taxi_app` imports. The IRIS process outlives any number of edits, and `sys.modules`
-keeps whatever `dashboard.py` was the first time anything imported it, so editing
-`dashboard.py` and reloading the browser serves the old code. The failure is silent
-in the worst way: the API answers `200` with a payload from a version that no longer
-exists on disk. Here it renamed a key in `/api/meta`, which left the page's header
-and filter bar populated and *every tab blank*, with nothing in the log and no error
-in the browser.
-
-So `taxi_app.py` reloads its own dependencies — `db`, `rules`, `analytics`,
-`dashboard`, in that dependency order — once at import and then whenever a
-`before_request` hook notices an `mtime` change. Four `os.stat` calls in front of
-handlers that run multi-hundred-millisecond aggregates, and always on, because a
-reload flag you have to remember to set is a flag that is off when it matters.
-
----
-
-## The flag policy (the part that changes the answers)
-
-`analytics.py` opens with a warning worth repeating: **do not default to
-`flag_count = 0`.**
-
-Excluding all flagged trips drops the average trip distance from 19.02 to 2.90
-miles. It also silently discards the ~55,600-trip `meter_metadata_missing` block —
-a *correlated* population, not scatter — which tilts a demand count rather than
-just shrinking it. Those trips' fares and distances are sound; the flag marks
-missing meter metadata, not a bad measurement.
-
-So relevance is **per measure**, not global (`rules.MEASURE_RULES`):
-
-| Measure | Excludes |
-|---|---|
-| `count` | only `pickup_outside_2023` — a broken meter reading does not mean nobody got in the cab |
-| `distance` | cast failures, non-positive and implausible distances, reformatted distances, implausible speeds |
-| `fare` | cast failures, negative fare/total, fare > \$500, extreme \$/mile |
-| `duration` | cast failures, non-positive/excessive duration, implausible and crawling speeds |
-| `tip` | cast failures, negative tips |
-
-`analytics.exclude_for(measure)` renders that as a `NOT EXISTS` against `TripFlag`
-— chosen over a bitmask test on `Trip` because `TripFlag`'s bitmap index on
-`rule_id` makes it an index read, while any bitmask expression forces a full 787k
-scan.
-
-Two more corrections applied everywhere:
-
-- **Unknown zones.** Lookup IDs 264 and 265 (`Unknown`, `Outside of NYC`) resolve
-  through every join and produce a named-but-unusable row — worse than a NULL — so
-  geographic rollups exclude them deliberately.
-- **Cash tips.** Cash fares record a tip of `0.00` in 100% of cases, because a cash
-  tip never reaches the meter: *unobserved*, not zero. Averaging over all payment
-  types halves the answer, so tip analysis restricts to card payments
-  (`rules.CARD_PAYMENT`).
-
-And every number ships with its denominator. `analytics.report_exclusions` prints
-it; in the dashboard each KPI tile carries the row count its average was computed
-over (`COUNT` of the same expression, in the same statement), and the trip-quality
-tab's policy comparison quantifies the choice in full. A figure derived from a
-filtered population is only interpretable next to the size of what was filtered
-out.
-
----
-
-## User workflows
-
-Five in the terminal (`analytics.py`), five tabs in the dashboard. Every one pushes
-the whole computation into IRIS.
-
-**Terminal** — `irispython analytics.py [zones|time|fares|pairs|policy]`, or
-`analytics.py sql "<statement>"` as an escape hatch for one-off questions:
-
-1. **`zones`** — busiest pickup and drop-off zones, plus a borough rollup.
-2. **`time`** — activity by hour of day (with an ASCII bar chart), day of week and
-   month.
-3. **`fares`** — fares, tips and distances compared across boroughs and zones.
-   `HAVING COUNT(*) >= 500` keeps the tail out: a zone with nine trips is not
-   evidence about that zone, it is evidence about nine trips.
-4. **`pairs`** — most common origin/destination pairs with cost and duration, and
-   same-zone round trips reported separately.
-5. **`policy`** — the same four numbers under four flag policies, measured at run
-   time. Read this one first; it shows the policy choice moving an answer further
-   than the question does.
-
-**Dashboard** (`http://localhost:52773/taxi/`) — one filter bar (month, day, hour,
-pickup borough) applies across all tabs, so no panel is ever computed over a
-different population than the one beside it. Each filter is a dropdown of toggle
-chips with quick picks (quarters, weekdays, the two peaks); the closed button states
-its own selection, so a narrowed field is visible without opening it:
-
-| Tab | What it shows |
-|---|---|
-| **Overview** | Five KPI tiles — each computed by its own statement, because trips/distance/fare/duration carry different exclusions and one `SELECT` would force one policy on all four. Monthly trend, hourly profile, and a 24×7 demand heatmap (one `GROUP BY` on two bitmap-indexed columns returning ≤168 rows — the finished heatmap, not raw rows pivoted in Python). |
-| **Geography** | Borough rollup, top pickup and drop-off zones, OD pairs, payment mix. |
-| **Trip quality** | The three-policy comparison — the same four figures with no flag filter, with `flag_count = 0`, and with the per-measure exclusions — followed by every rule with its total flags *and its sole-flag count*, the number that matters for a policy argument, since a rule that only fires alongside others costs nothing extra to exclude. Selecting a rule opens its flagged trips. |
-| **Trips** | The investigation view: filter to flagged records, or to the records one rule flagged, and open any of them. Paged inside IRIS — no `LIMIT`/`OFFSET` in IRIS SQL, so the idiom is `TOP` for the upper bound and `%VID` for the lower. Each row carries its rule names, decoded from `flag_mask` by the `Taxi.mask_names` UDF after `TOP` has cut the result to 50 rows. |
-| **Push-down** | The stretch goal, on demand. |
-
-**The flagged-record view is the trip-quality workflow's payoff**, and the only
-panel that applies no flag exclusions at all — the exclusions exist to keep a
-broken measurement out of an *average*, so applying them to the list of suspect
-records would hide the point. Opening a trip shows its flags with each rule's
-description *beside the raw `TripRaw` text the row was parsed from*, which is the
-only way to settle a flagged value: `'1,571.97'` with a thousands separator that
-survived the cast reads differently from `1571.97`.
-
-Rules stay data, not code (`Taxi.TripQuality.predicate`), so changing a threshold
-is an `UPDATE` plus one call to `Taxi.apply_rules_now()` — see *Changing a quality
-threshold* below.
-
----
-
-## The stretch goal: push-down comparison
-
-`dashboard.pushdown_compare` computes one aggregate twice and reports both:
-
-- **pushed** — one `GROUP BY`; IRIS aggregates and returns a handful of rows.
-- **pulled** — the same rows streamed into Python (`db.iter_rows`) and accumulated
-  in a dict.
-
-Measured on the borough rollup over all 787,060 trips. The Push-down tab computes
-the first row live; the second is kept from when this project still had a host-side
-DB-API transport, because the comparison between the two is the interesting part:
-
-| Transport | Pushed | Pulled | Speed-up | Rows moved |
-|---|---|---|---|---|
-| Embedded, in-process (what runs now) | 0.15 s | 3.06 s | 21× | 8 vs 787,053 |
-| Host Python over DB-API on 1972 (removed) | 0.09 s | 0.77 s | 8.5× | 8 vs 787,053 |
-
-The answers are compared rather than assumed equal: counts agree exactly, averages
-to within floating-point noise (SQL `AVG` is decimal, Python's `sum` is not), and
-the largest disagreement is reported — it is the number that would grow if one side
-were wrong.
-
-Reading it:
-
-- **The wall-clock ratio is the smaller effect.** The durable number is the data
-  ratio (~98,000× less moved), identical either way because it is a property of the
-  query, not the transport.
-- **The row-by-row path was ~4× slower *inside* IRIS than over the socket.**
-  Embedded Python removes the network, not the per-row cost of handling a row in
-  Python. So this argues for not writing row-by-row code in *either* place — which
-  is also why the row-by-row half survives only as the control arm of a measurement.
-- **Which would we prefer if the data grew?** Push-down, and not marginally: the
-  pushed side's cost scales with the number of *groups*, the pulled side's with the
-  number of *rows*.
-
----
-
-## How this maps to the project guide
-
-The brief is `docs/project_guide.md` (Team 3, Project B — NYC Taxi Trip Insights).
+Against the project guide's requirements:
 
 | Requirement | Where |
 |---|---|
-| Load the taxi data into an IRIS Community Edition instance you set up | `Dockerfile`, `docker-compose.yml`, `iris.script` build and configure the instance; stage 2 loads all 787,060 rows with server-side `LOAD DATA` |
-| Python as the primary implementation language | Every stage, all analytics, the dashboard, and two SQL functions written in Python (`LANGUAGE PYTHON`) |
-| IRIS as the data platform | Three-layer schema, bitmap indexes, a view, rules stored as data, transactions, prepared statements, `TUNE TABLE`, Python UDFs, IRIS-hosted WSGI application |
-| Enrich locations using the taxi-zone lookup | `Taxi.Zone` + the `Taxi.TripEnriched` view; boroughs and zone names on both ends of every trip. `Trip`'s location columns are typed as the `Zone` class, so a single column filters as an integer id *and* traverses to borough |
-| Trip-quality workflow identifying records for investigation | 16 rules in `Taxi.TripQuality` across two phases and two severities — invalid/unusual durations, zero and negative distances, negative and extreme fares, and the compound distance/time/fare disagreements the brief specifically names (`speed_implausible`, `fare_per_mile_extreme`, `speed_crawling`) |
-| At least two additional user workflows | Five: busiest zones, activity by hour/day/month, fare–tip–distance comparison across zones, OD pairs, and the policy-impact analysis. All five in the terminal and in the dashboard, alongside the flagged-record inspector |
-| Present through an interface of your choice | Both: a CLI (`analytics.py`) and a Flask SPA hosted by IRIS itself |
-| Demonstrate Python + IRIS making the data more useful than raw files | The raw file cannot answer "which trips are suspect, why, and how much does excluding them move the answer" — that is the whole `TripRaw` → `Trip` → `TripFlag` chain plus the policy comparison. And `'1,571.97'` in a CSV is a string; here it is a stored measurement with its provenance recorded next to it |
-| **Stretch:** push more work into IRIS and compare | `dashboard.pushdown_compare` — the same question answered by one `GROUP BY` and by pulling every row into Python, timed side by side, with the agreement check and the analysis above |
-
-**Notes on friction**, since the brief asks for them. The things that cost the most
-time were all cases where IRIS did something reasonable but *silently*: the
-`DDLPKeyNotIDKey` default quietly breaking object-reference columns; `%EXACT` and
-uppercase collation turning `Manhattan` into `MANHATTAN` in every `GROUP BY`;
-`TIMESTAMP` columns comparing **lexically** against date string literals (so
-`pickup_ts < '2023-01-01'` matched all 787,060 rows instead of 7 — no error, just a
-wrong answer, which is why that rule uses `YEAR(pickup_ts)`); the missing
-`DispatchClass` and `ServeFiles = 0` on a hand-built WSGI application; and the
-`isStatInvalid` view defect that surfaces after unrelated later work rather than at
-`CREATE VIEW` time. Each of those is now a comment at the site of the workaround,
-and several have a build-time self-test so a regression fails the build instead of
-the analytics. Smaller ones: no `LIMIT`/`OFFSET` (use `TOP` + `%VID`), no bitwise
-operators in SQL (hence the UDF), `iris.sql.exec` raising `SQLError` with an *empty*
-message for the perfectly normal "affected zero rows", `None` not being accepted as
-NULL under Embedded Python, and `pip install` needing
-`--target /usr/irissys/mgr/python` or the module is invisible to `irispython`.
+| Load the supplied CSVs into IRIS | `load.py`, server-side `LOAD DATA` |
+| Enrich pickup/dropoff with borough and zone | `transform.py`, two `LEFT JOIN`s onto `Taxi.Zone` |
+| Trip-quality workflow identifying questionable records | `quality.py`, 14 rules |
+| ...and *using* those flags without biasing the answers | `quality.py`'s [relevance model](#the-relevance-model-which-rows-a-figure-may-ignore): each rule declares which measures it invalidates |
+| Two or more additional user workflows | `analytics.py`: busiest zones, activity by hour/day/month, fare & tip comparison, OD pairs |
+| Present through an interface | `web.py` + `static/`, a single-page dashboard |
+| Show Python + IRIS beats raw files | `bench.py`, and the whole cleaning-impact story |
+| **Stretch:** filter/aggregate in IRIS vs pull into Python | `bench.py`, three arms (SQL / host pandas / Embedded Python), measured with correctness assertions |
 
 ---
 
-## Where IRIS features are used
+## Architecture: who does what
 
-| Feature | Used for |
+The brief was to lean on Python but make real use of IRIS. The line I drew, and
+held everywhere:
+
+> **IRIS does all the work over rows. Python decides what work to do, and
+> presents the answer.**
+
+Concretely:
+
+- **No function in this project ever pulls a row-per-trip result set** for
+  analysis. Every analytical query groups, filters and orders server-side and
+  returns tens of rows. `bench.py` exists precisely to show what breaking that
+  rule costs.
+- **Bulk load is server-side.** IRIS reads the 100 MB file off a bind mount
+  itself; Python issues one statement and waits.
+- **The cast, the derivations and the enrichment join are one `INSERT ... SELECT`.**
+  787,060 rows are typed, have seven columns derived, and are joined twice
+  against the zone lookup, without a single row crossing the driver.
+- **The quality rules are Python objects compiled into SQL.** The rule
+  *definitions* — predicate, threshold, severity, description — live in a Python
+  list, because that is what you want to read and review. Evaluating them is two
+  `UPDATE` statements. Nothing is evaluated row-by-row in Python.
+- **pandas only ever sees already-aggregated results.** It labels day numbers,
+  maps payment-type codes, pivots 168 rows into a heatmap. Presentation work.
+
+The one place this inverts is `bench.py`, deliberately.
+
+### Why the rules live in Python
+
+`quality.py` is the clearest expression of the split, so it is worth a moment:
+
+```python
+Rule(
+    name="implausible_speed",
+    column="QImplausibleSpeed",
+    severity="error",
+    description="Average speed above {max_mph} mph",
+    predicate="AvgMph > {max_mph}",
+)
+```
+
+Adding a rule is a one-line change. `schema.py` reads the same registry to
+generate one `BIT DEFAULT 0` column per rule, and `apply_rules()` reads it to
+generate the SQL. So the flag column, the DDL, the predicate, the human-readable
+description and the dashboard row all come from one declaration — there is no
+second place to forget to update.
+
+Thresholds are named constants substituted into the predicates, so
+`DEFAULT_THRESHOLDS` is the single place cutoffs are stated rather than having
+numbers buried in fourteen SQL strings.
+
+Each rule also declares **which measures it invalidates**, which is what makes the
+analytics selective rather than blunt — see [the relevance
+model](#the-relevance-model-which-rows-a-figure-may-ignore) below.
+
+Flagging is a *separate, re-runnable stage*, not folded into the load. Tuning a
+threshold and re-flagging takes 12 seconds and does not re-read the CSV.
+
+### The relevance model: which rows a figure may ignore
+
+The obvious way to wire the quality workflow into the analytics is
+`WHERE QualityIssueCount = 0` — drop every flagged row from every figure. That is
+what this project did first, and it is wrong in a way worth explaining, because it
+looks careful.
+
+A row flagged for a missing passenger count tells you nothing about its own fare.
+Dropping it from an average fare discards good evidence for an unrelated reason.
+Worse, it does not merely lose precision: **the rows a blunt filter drops are not a
+random sample**, so it introduces bias. Measured on this file:
+
+| Rows dropped because… | Rows | Their average fare |
+|---|---|---|
+| `total_mismatch` | 115,009 | **$19.43** |
+| `missing_passenger_count` | 61,703 | **$24.44** |
+| `non_positive_distance` | 38,621 | **$23.95** |
+| `unknown_zone` | 9,504 | **$44.09** |
+| *(rows that pass every rule)* | 598,358 | **$17.35** |
+
+Every group the blunt filter throws out has a higher average fare than the group
+it keeps. So `WHERE QualityIssueCount = 0` reports an average fare of **$17.35**
+where the rows that actually have a usable fare say **$18.37** — a 5.9% error, in
+a figure whose whole purpose is accuracy.
+
+So instead, each rule names the measures it casts doubt on, and each query names
+what it depends on. `quality.MEASURES` is a small closed vocabulary — the only
+facts about a trip anything here reads:
+
+```
+trip_count  location  time  distance  duration  speed
+fare  tip  total  fee_breakdown  passengers
+```
+
+and each rule maps onto it:
+
+| Rule | Invalidates |
 |---|---|
-| **Embedded Python** (`irispython`, `iris.sql.exec`) | The whole pipeline *and* every dashboard request — in-process, no serialisation |
-| **`LOAD DATA FROM FILE`** | Server-side CSV ingest of 787k rows; the data never enters a Python process |
-| **`iris.sql.prepare()`** | Prepare-once/execute-many for the 787k-row cast |
-| **`iris.tstart` / `tcommit` / `trollback`** | One transaction per 50k-row chunk |
-| **Object-reference columns** | `Trip.pu_location_id` typed as `Taxi.Zone` — arrow traversal resolved as a left outer join, no borough strings duplicated across 787k rows |
-| **Bitmap indexes** | `TripFlag(rule_id)`, `Trip(flag_count)`, both locations, hour, month |
-| **`CREATE FUNCTION … LANGUAGE PYTHON`** | `Taxi.mask_names()` (bitmask decoding SQL cannot express) and `Taxi.apply_rules_now()` (forty statements collapsed to one call) |
-| **Views + `%EXACT`** | `Taxi.TripEnriched` — the zone/borough enrichment layer |
-| **`TUNE TABLE`** | Optimiser statistics after the load |
-| **`INFORMATION_SCHEMA`** | Verifying drops actually happened |
-| **WSGI hosting** (`Security.Applications`, `%SYS.Python.WSGI`) | IRIS serves the Flask dashboard on 52773 |
-| **`TOP` + `%VID`** | Server-side paging, IRIS having no `LIMIT`/`OFFSET` |
-| **Security services** | `%Service_CallIn` for Embedded Python; password auth on the web app with no role grants |
+| `negative_amount` | `trip_count`, `fare`, `tip`, `total`, `fee_breakdown` |
+| `total_mismatch` | `fee_breakdown` |
+| `missing_passenger_count` | `passengers` |
+| `unknown_zone` | `location` |
+| `outside_2023` | `time` |
+| `non_positive_duration` | `duration`, `speed`, `time` |
+| `non_positive_distance` | `distance`, `speed` |
+| `excessive_distance` | `distance`, `speed` |
+| `implausible_speed` | `distance`, `duration`, `speed` |
+| `implausibly_short` | `distance`, `duration`, `speed` |
+| `excessive_duration` | `duration`, `speed` |
+| `stalled_trip` | `duration`, `speed` |
+| `excessive_fare` | `fare`, `total` |
+| `disproportionate_tip` | `tip`, `total` |
 
-**One transport, everywhere.** Every statement in this project — loader, rules,
-analytics, dashboard request — is issued by `iris.sql.exec` inside the IRIS process.
-`db.py` proves that at import: it does `from irisbuiltins import SQLError`, which
-only resolves inside IRIS, so the wrong interpreter fails immediately with the right
-command to run instead rather than starting cleanly and dying on its first
-statement.
+Two mechanisms consume it, and the split between them matters:
 
-An earlier version of this code also ran outside IRIS, over the Python DB-API
-(`iris.connect()` to 1972), with `db.py` branching on an `EMBEDDED` flag. That was
-removed. The measurement it produced is worth keeping (see the push-down table
-above) but the second code path was not: it doubled the surface of every helper —
-`None` vs `''` for NULL, cursors vs `iris.sql.exec` result objects, a connection per
-thread — to support a transport that nothing in the deliverable used. `/api/meta`
-still reports the transport and the footer still displays it, because "the aggregate
-ran inside the database" is this project's central claim and it should be legible on
-the page making it.
+**A row filter**, on the measures that define the *population* — that the trip
+happened, plus whatever the query groups by. `trip_count` is deliberately
+invalidated by exactly one rule, `negative_amount`, because a refund is an
+accounting entry against a trip already counted elsewhere. Everything else leaves
+the row countable.
 
----
-
-## Running everything
-
-### Prerequisites
-
-Docker (with `docker compose`), and the two CSVs in `./data/`:
-
-```
-data/2023_Green_Taxi_Trip_Data.csv
-data/taxi_zone_lookup(in).csv
-```
-
-Both paths are `db.TRIP_CSV` / `db.ZONE_CSV`; the compose file mounts `./data`
-read-only at `/data` inside the container.
-
-### 1. Start IRIS
-
-```bash
-docker compose up -d --build
-```
-
-The image is built rather than used directly for two reasons, both dev-only: a
-stock IRIS image ships `_SYSTEM` with its password flagged **expired**, which turns
-the first driver login into an auth failure; and `%Service_CallIn` needs enabling
-for Embedded Python and the Native API. `iris.script` handles both at build time,
-so a fresh `docker compose up` is immediately usable. Flask is installed with
-`--target /usr/irissys/mgr/python` because Embedded Python does not use the system
-site-packages — a plain `pip install flask` succeeds and the module is then
-invisible to IRIS.
-
-Published ports: **1972** (superserver — DB-API/Native/JDBC/ODBC) and **52773**
-(web — Management Portal and the dashboard). Credentials on this dev image:
-`_SYSTEM` / `SYS`, namespace `USER`.
-
-### 2. Run the pipeline and register the application
-
-```bash
-# everything: stages 1-4, the SQL function, the web application
-docker exec -w /src nyc-taxi-iris /usr/irissys/bin/irispython run.py
-
-# drop and rebuild, casting only the first 20,000 raw rows -- a fast smoke test
-docker exec -w /src nyc-taxi-iris /usr/irissys/bin/irispython run.py --reload 20000
-
-# re-apply the quality rules only, after editing rules.py
-docker exec -w /src nyc-taxi-iris /usr/irissys/bin/irispython run.py --flags
-```
-
-`run.py` skips stages 1–3 when `Taxi.Trip` is already populated, so the no-argument
-form is safe to repeat. `./run.sh` is this plus `docker compose up -d`, a wait for
-IRIS to accept SQL, and `open`.
-
-Any stage can also be run alone — they are separate modules with `__main__` blocks:
-
-```bash
-docker exec -w /src nyc-taxi-iris /usr/irissys/bin/irispython stage1_schema.py
-docker exec -w /src nyc-taxi-iris /usr/irissys/bin/irispython stage2_load_raw.py
-docker exec -w /src nyc-taxi-iris /usr/irissys/bin/irispython stage3_cast.py
-docker exec -w /src nyc-taxi-iris /usr/irissys/bin/irispython stage4_flag.py   # ← re-run after a threshold change
-```
-
-`-w /src` matters: `./src` is bind-mounted there read-only, so you edit on the host
-and IRIS executes the new code with no rebuild between runs.
-
-Stage 5 is the same: `stage5_procs.py` and `stage5_web.py` are re-runnable on their
-own, and `stage5_web.py` deletes and recreates the application, so editing its
-`PROPS` and re-running changes them.
-
-### 3. Look at the results
-
-**Dashboard**, served by IRIS itself:
-
-```
-http://localhost:52773/taxi/
-```
-
-The first request redirects to the IRIS login page; sign in as `_SYSTEM` / `SYS`
-and the `CSPSESSIONID` cookie carries the SPA's `/taxi/api/*` calls. Editing
-anything under `src/` takes effect on the next request — see
-[the `WSGIDebug` note in stage 5](#stage-5--the-application-layer-stage5_procspy-stage5_webpy).
-
-**Terminal analytics:**
-
-```bash
-docker exec -w /src nyc-taxi-iris /usr/irissys/bin/irispython analytics.py         # all five
-docker exec -w /src nyc-taxi-iris /usr/irissys/bin/irispython analytics.py policy
-docker exec -w /src nyc-taxi-iris /usr/irissys/bin/irispython analytics.py zones time
-docker exec -w /src nyc-taxi-iris /usr/irissys/bin/irispython analytics.py sql \
-    "SELECT TOP 5 pu_zone, COUNT(*) FROM Taxi.TripEnriched GROUP BY pu_zone ORDER BY 2 DESC"
-```
-
-**Management Portal**, for SQL by hand: `http://localhost:52773/csp/sys/UtilHome.csp`
-
-### Changing a quality threshold
-
-The loop the schema is built around. The rules are rows, so this is an `UPDATE`:
+**A per-column guard** (`quality.guard`) on each aggregate, so one query can report
+a trip count over the widest defensible population while each average beside it is
+drawn only from rows that can support *that number*:
 
 ```sql
-UPDATE Taxi.TripQuality
-   SET predicate = 'trip_distance > 60',
-       description = 'Over 60 miles.'
- WHERE rule_name = 'distance_implausible';
+SELECT COUNT(*) AS trips,
+       ROUND(AVG(CASE WHEN QNonPositiveDistance = 0 AND QImplausiblyShort = 0
+                       AND QExcessiveDistance = 0 AND QImplausibleSpeed = 0
+                      THEN TripDistance END), 2) AS avg_miles,
+       ROUND(AVG(CASE WHEN QNegativeAmount = 0 AND QExcessiveFare = 0
+                      THEN FareAmount END), 2)   AS avg_fare
+FROM Taxi.Trip
+WHERE QNegativeAmount = 0 AND QUnknownZone = 0
 ```
 
-then re-flag — seconds, not a reload:
+`AVG` and `SUM` skip NULLs, so each guarded aggregate gets its own denominator
+without a second query. The denominators therefore differ *by design*, which is
+only honest if you show them — `quality.measure_coverage()` does, in one pass, and
+it is on the Trip quality tab:
+
+| Measure | Usable rows | % of file |
+|---|---|---|
+| `time` | 786,020 | 99.87% |
+| `trip_count` | 784,808 | 99.71% |
+| `fare` | 784,778 | 99.71% |
+| `tip` | 784,196 | 99.64% |
+| `total` | 784,166 | 99.63% |
+| `location` | 777,462 | 98.78% |
+| `duration` | 776,404 | 98.65% |
+| `distance` | 741,533 | 94.22% |
+| `speed` | 737,852 | 93.75% |
+| `passengers` | 725,304 | 92.15% |
+| `fee_breakdown` | 669,798 | 85.10% |
+| **the blunt filter** | **598,358** | **76.02%** |
+
+The heatmap is the cleanest illustration. It reports nothing but counts by weekday
+and hour, so only three of the fourteen rules have any say in it — the ones that
+make a row uncountable or untimeable. `total_mismatch` and
+`missing_passenger_count`, 176,000 rows between them, have no opinion about when
+someone hailed a cab.
+
+Two places take the coarser tool deliberately, and both are commented as such:
+
+- **`fare_comparison_across_zones`** computes `SUM(fare)/SUM(distance)`. A ratio
+  must draw both inputs from the same rows or the numerator and denominator
+  describe different populations, so fare and distance are filtered at row level
+  rather than guarded independently.
+- **`headline_numbers.clean_trips`** keeps the strict definition, because that
+  particular headline genuinely is "how much of this file is unblemished".
+
+### Layers
+
+```
+data/*.csv
+    │  server-side LOAD DATA (IRIS reads the file itself)
+    ▼
+Taxi.TripRaw      all VARCHAR, 20 columns, zero constraints — nothing can fail
+Taxi.ZoneRaw      the landing tables
+    │  one INSERT ... SELECT: cast, derive, enrich
+    ▼
+Taxi.Trip         typed + 7 derived columns + 4 enrichment columns + 14 flags
+Taxi.Zone         typed lookup, INTEGER primary key
+    │  two UPDATE statements (flags, then issue count)
+    ▼
+Taxi.Trip         flagged and countable
+    │  GROUP BY, in IRIS, always
+    ▼
+analytics.py  →  web.py (JSON)  →  static/app.js (SVG)
+```
+
+The all-VARCHAR landing table is the load answer to a file you have not profiled
+yet: **nothing can fail to land**, so the load either works completely or not at
+all. Values that are *unreadable* are then caught by the cast, and values that
+are *wrong* by the rules. Those are different problems and they get different
+stages. Every row is accounted for — `cast_and_enrich` raises if
+`loaded + rejected != raw`.
+
+---
+
+## The pipeline, stage by stage
+
+Measured on this laptop, IRIS Community in Docker, full 787,060-row file:
+
+| Stage | Time | What happens |
+|---|---|---|
+| 1. schema | 0.50s | DDL generated from Python, including 14 flag columns |
+| 2a. load zones | 0.17s | 265 rows, landed then typed |
+| 2b. load trips | **0.72s** | 787,060 rows, server-side `LOAD DATA` |
+| 3. cast + enrich | **71.11s** | typing, 7 derived columns, 2 enrichment joins |
+| 4a. flag rows | 7.40s | 14 predicates, one pass |
+| 4b. count issues | 4.65s | sum the flag columns |
+| 5. indexes | 4.80s | 5 bitmap + 3 standard, built *after* the load |
+| 6. tune tables | 0.58s | optimiser statistics |
+| **Total** | **~90s** | empty database → indexed, flagged, queryable |
+
+Two things worth noticing.
+
+**The load is not the slow part.** 787,060 rows land in 0.72 seconds. The
+expensive stage is the cast — see [limitation #1](#known-limitations) for why,
+and it is my fault rather than IRIS's.
+
+**Indexes are built after the load, not before.** Bitmap indexes on
+`PickupHour`, `PickupMonth`, `PUBorough`, `PaymentType` and `QualityIssueCount`
+are ideal for this workload (low cardinality, always in a `WHERE` or `GROUP BY`)
+but maintaining them during a bulk insert is wasted work.
+
+---
+
+## The friction log
+
+This is the substance of the exercise. Twenty items, grouped, each with the real
+error text where there was one.
+
+Ranked by how much time they cost, the worst four were **#4** (the brace
+conflict), **#11** (collation), **#13** (thousands separators) and **#6** (the
+silently-ingested header). Note what they have in common: three produced
+misleading errors, and one produced none.
+
+### Getting connected
+
+#### 1. The package name is not the module name
 
 ```bash
-docker exec -w /src nyc-taxi-iris /usr/irissys/bin/irispython stage4_flag.py
-# or, in one SQL call:  SELECT Taxi.apply_rules_now()
+pip install intersystems-irispython   # installs this
 ```
+```python
+import iris                            # imports as this
+```
+
+There is nothing in the install output that tells you this. `import
+intersystems_irispython` fails, and searching for the failure finds nothing
+useful because everyone who knows just writes `import iris`.
+
+**Cost:** ten minutes and a lucky guess.
+**Fix for the guide:** one line in the setup instructions.
+
+#### 2. The stock image ships an expired password
+
+The first DB-API connect against a fresh `intersystemsdc/iris-community` fails on
+authentication. The cause is that `_SYSTEM`'s password is *pre-expired* — IRIS
+wants you to change it on first login — but the driver reports it as an
+authentication failure, so you spend your time double-checking the password you
+just typed correctly.
+
+The Native API additionally requires the `%Service_CallIn` service to be enabled,
+which is off by default and produces a *different* failure.
+
+Both are fixed at image build time rather than by hand, so the environment is
+reproducible:
+
+```objectscript
+zn "%SYS"
+do ##class(Security.Users).UnExpireUserPasswords("*")
+set props("Enabled") = 1
+do ##class(Security.Services).Modify("%Service_CallIn", .props)
+halt
+```
+
+That is `iris.script`, run by the `Dockerfile` during build. It is the reason
+step 2 of the quick start is `up -d --build` and not just `up -d`.
+
+**Cost:** about 45 minutes, most of it doubting the credentials.
+**Fix for the guide:** ship exactly this compose file. Nobody should meet
+`Security.Users.UnExpireUserPasswords` on day one.
+
+#### 3. Port collisions fail confusingly
+
+Two IRIS containers both wanting 1972 do not produce a clean error; you get a
+connection to something, and the something may not be what you think. Offsetting
+to 1973/52774 in `docker-compose.yml` and putting the port in `.env` was the fix.
+
+**Fix for the guide:** mention it, and suggest non-default ports up front.
+
+### The driver
+
+#### 4. `LOAD DATA ... USING {...}` cannot go through the DB-API driver
+
+The single biggest time sink, and the most interesting bug.
+
+`LOAD DATA` takes its options as a JSON object:
+
+```sql
+LOAD DATA FROM FILE '/data/trips.csv' INTO Taxi.TripRaw (...)
+  VALUES (...) USING {"from":{"file":{"header":1}}}
+```
+
+Through `iris.connect()` (DB-API), that fails at prepare time with:
+
+```
+<PARAMETER ERROR>; Parameter Name error, First value cannot be a digit: 1
+```
+
+Which is not a message about JSON, or about `LOAD DATA`, or about braces. It is
+a message about a *parameter*, and there is no parameter in the statement.
+
+What is actually happening: the DB-API layer treats `{` as the start of an
+**ODBC escape sequence** (the `{ts '...'}`, `{fn ...}`, `{call ...}` family), so
+it tries to parse `{"from":...}` as one, chokes on the `1` in `"header":1`, and
+reports it as a parameter error.
+
+Two things confirmed the diagnosis rather than assuming it:
+
+1. The **identical statement** run in `iris sql` inside the container works
+   perfectly — 1000 rows, header correctly skipped. So the statement is valid and
+   the server is fine; the client mangled it.
+2. Passing the JSON as a bound parameter (`USING ?`) fails *differently*:
+   ```
+   <THROW>%FromJSON+30^%Library.DynamicAbstractObject
+   ```
+   because the `USING` clause is read at prepare time, when no parameter is bound
+   yet. So parameterising is not a workaround either.
+
+**The fix** is to send the statement as a *string argument* through the Native
+API, where no ODBC escape parsing happens:
+
+```python
+irispy = iris.createIRIS(iris.createConnection(...))
+result = irispy.classMethodObject("%SQL.Statement", "%ExecDirect", None, sql)
+```
+
+That is what `db.exec_direct()` is, and it is the only reason it exists. Its
+docstring says so, at length, because the next person to read that function will
+otherwise wonder why there are two ways to run a statement.
+
+**Cost:** the better part of two hours.
+**Fix:** this is a driver bug — brace handling should not apply to a clause the
+server parses as JSON. Failing that, it needs to be documented loudly on the
+`LOAD DATA` page, because `LOAD DATA` + Python is an obvious combination and
+`header:1` is not an exotic option.
+
+#### 5. One package, two connection APIs, no guidance
+
+`intersystems-irispython` gives you:
+
+- `iris.connect()` → DB-API 2.0. Cursors, `?` markers, `cursor.description`.
+  Behaves like `sqlite3`. This is what you want for 95% of the work.
+- `iris.createConnection()` + `iris.createIRIS()` → the Native API. Globals,
+  class methods, `%ExecDirect`. Different object model entirely.
+
+Nothing tells you that the first cannot do `LOAD DATA` options and the second
+can. You need both, for one function each, and you find that out by hitting #4.
+
+**Fix for the guide:** a short "which API for which job" table.
+
+### `LOAD DATA`
+
+#### 6. Without `header:1`, the header becomes a data row. Silently.
+
+The failure that produced no error at all. A 1000-line test file gave **1001
+rows**, one of which had `VendorID = 'VENDORID'`.
+
+Because the landing table is all-VARCHAR by design (see
+[architecture](#architecture-who-does-what)), there is nothing for that row to
+violate. It loads clean. It survives the cast as a row of NULLs. It reaches the
+analytics. On the full file it would be one bogus row in 787,060 — small enough
+to never notice, large enough to be wrong.
+
+This one is only caught by checking `COUNT(*)` against `wc -l`, which is now
+what `load_trips` prints.
+
+**Cost:** 20 minutes, and it was luck that the test file had a round number of
+lines.
+**Fix:** `LOAD DATA` should default to skipping a header when it can detect one,
+or at minimum warn. A CSV with a header row is the common case, not the exception.
+
+#### 7. With `header:1`, columns map by *name*, not position
+
+Having added `header:1`, the load broke a different way:
+
+```
+LoaderException: Invalid VALUE column, 'zonename' is not defined in header
+```
+
+My column was `ZoneName`; the CSV's header says `Zone`. Once a header exists,
+`LOAD DATA` matches source to target by header name, so positional assumptions
+silently stop applying — and a *renamed* column is a hard error rather than a
+mismatch.
+
+The fix, and the better habit anyway, is to state the mapping explicitly:
+
+```sql
+INTO Taxi.Zone (LocationID, Borough, ZoneName, ServiceZone)
+VALUES         (LocationID, Borough, Zone,     service_zone)
+```
+
+`load.py` uses this form even where both lists are identical, so the
+correspondence between file and table lives in one readable place
+(`schema.ZONE_COLUMN_MAP`, `schema.TRIP_COLUMN_MAP`) instead of being implied.
+
+Related: **double-quoting identifiers in the DDL made this worse**, because
+quoted identifiers are case-sensitive and the CSV headers are not consistently
+cased. Dropping the quotes lets IRIS fold them and the mismatch disappears.
+
+#### 8. Paths are resolved server-side
+
+`LOAD DATA FROM FILE '/data/...'` is a path *inside the container*, not on your
+laptop. Obvious in hindsight; not obvious at 5pm. This is why
+`docker-compose.yml` bind-mounts `./data:/data:ro` and `.env` stores the
+container path (`TRIPS_CSV_CONTAINER_PATH`) rather than a host path.
+
+### The SQL dialect
+
+#### 9. `HOUR` and `MONTH` are reserved words
+
+```sql
+SELECT DATEPART('hour', PickupDateTime) AS hour   -- no
+```
+```
+IDENTIFIER expected, reserved word HOUR found
+```
+
+Fine, once you know. The problem is that IRIS's reserved-word list is longer than
+the SQL standard's and I had no reason to expect two such ordinary words to be on
+it. Aliases are now `pickup_hour` and `month_num`.
+
+**Fix for the guide:** link the reserved-word list from anywhere a newcomer
+writes their first `SELECT`.
+
+#### 10. `TO_TIMESTAMP` needs the right format model for a 12-hour clock
+
+The trip file stores `01/15/2023 06:23:41 PM`. The format model that reads it
+correctly is `'MM/DD/YYYY HH:MI:SS AM'` — note that `AM` is the *literal token
+for a meridian indicator*, not an assertion that the value is morning. Get the
+model wrong and you get plausible-looking timestamps twelve hours out, which is
+the worst kind of wrong.
+
+#### 11. The default collation silently uppercases every grouped string
+
+The one that felt most like my own bug, and it was not.
+
+```sql
+SELECT PUBorough FROM Taxi.Trip WHERE ...            -- 'Manhattan'
+SELECT PUBorough FROM Taxi.Trip GROUP BY PUBorough   -- 'MANHATTAN'
+```
+
+Same column, same table, different case, no error, no warning. Every chart label
+and every borough name arrived shouting.
+
+The cause is that IRIS's default string collation is **`SQLUPPER`**, so the
+grouped value you get back is the *collated* value. I confirmed it by comparing
+`SELECT`, `GROUP BY` and `%EXACT()` forms of the same query, then tested three
+DDL spellings (`COLLATE SQLSTRING`, `COLLATE EXACT`, `COLLATE %EXACT` — all
+work). The fix is one clause per display column:
+
+```sql
+PUBorough   VARCHAR(50)  COLLATE SQLSTRING,
+PUZoneName  VARCHAR(100) COLLATE SQLSTRING,
+```
+
+**Cost:** about an hour, most of it spent looking for a bug in my own pandas
+code, because "my `GROUP BY` changes the data" is not a hypothesis you reach for.
+**Fix for the guide:** this deserves a paragraph in any IRIS SQL introduction.
+It is a correct, documented, defensible design decision that will surprise
+literally every developer arriving from PostgreSQL or MySQL, and it surprises
+them *silently*.
+
+### Data traps
+
+Not IRIS's fault, but they are friction, and they are where the real work was.
+
+#### 12. Quoted thousands separators inside numeric columns
+
+578 cells across three columns look like `"2,032.67"`. A blind
+`CAST(trip_distance AS NUMERIC)` does not skip those rows — it **aborts the
+statement**, which on a single `INSERT ... SELECT` over 787,060 rows means you
+get nothing and a message about one cell.
+
+The guarded repair:
+
+```sql
+CASE WHEN ISNUMERIC(REPLACE(trip_distance, ',', '')) = 1
+     THEN CAST(REPLACE(trip_distance, ',', '') AS NUMERIC(10,2))
+     ELSE NULL END
+```
+
+`ISNUMERIC` turns an abort into a NULL, which the quality rules then flag. And
+before writing that I checked that the comma is *always* followed by exactly
+three digits — otherwise it might be a decimal comma and stripping it would
+multiply values by a thousand. It is a separator. Verified, not assumed.
+
+Counts, from `cli profile`: 554 in `trip_distance`, 12 in `fare_amount`, 12 in
+`total_amount`. After the fix, **zero unparseable cells remain and zero rows are
+rejected**.
+
+#### 13. `ehail_fee` is 100% empty
+
+787,060 of 787,060 rows. Deliberately not carried into the typed table.
+
+#### 14. A 55,613-row block with three fields systematically missing
+
+`passenger_count`, `store_and_fwd_flag` and `congestion_surcharge` are missing
+together, for exactly the same 7.07% of rows. The identical count across three
+unrelated columns is the tell: this is one upstream system's output, not random
+loss. It also explains the `+2.75` reconciliation cluster in #16.
+
+#### 15. The zone lookup contains its own sentinels
+
+`LocationID` 264 is Borough `Unknown`, and 265 is Borough `N/A`. My first
+`unknown_zone` rule only checked for `'Unknown'` and NULL, and therefore
+undercounted by 3,771 rows (5,827 → **9,598**). The lookup you are joining to in
+order to clean your data needs cleaning too.
+
+#### 16. 14.6% of rows do not reconcile — and it is the file, not the rule
+
+`total_mismatch` flags 115,015 rows, far and away the largest flag. That is a
+number that looks like a bug in my own predicate, so I went looking for one
+rather than reporting it.
+
+It is real. The discrepancies **do not scatter** — they land on three exact
+values:
+
+| Discrepancy | Rows | Explanation |
+|---|---|---|
+| **−1.00** | 73,169 | `mta_tax` recorded as 1.50 where reconciling rows record 0.50, but `total_amount` was computed with 0.50 |
+| **−3.75** | 25,208 | that same dollar, *plus* a `congestion_surcharge` of 2.75 recorded but not included in the total |
+| **+2.75** | 15,684 | `congestion_surcharge` is NULL while `total_amount` still includes it — these are the #14 rows |
+
+A rounding bug scatters. Three sharp spikes at fee-sized values means the *fees
+were recorded inconsistently*, not that the trips are fake. So the flag is a
+reconciliation signal, and `analytics.total_reconciliation()` is the query that
+demonstrates it — it is on the Trip quality tab of the dashboard.
+
+This is the finding I would lead with, because the lesson generalises: **a flag
+firing on 15% of your data is a question, not an answer.**
+
+It also changed what the flag *does*. Because the mismatch is confined to how the
+fee columns were recorded, `total_mismatch` invalidates only `fee_breakdown` — not
+`fare`, not `tip`, not `trip_count`. The trip happened, the distance is real, and
+`fare_amount` is fine; it is the sum of the components that cannot be trusted. That
+single mapping puts 115,013 rows back into every other figure on the dashboard. See
+[the relevance model](#the-relevance-model-which-rows-a-figure-may-ignore).
+
+#### 17. Unfiltered averages are not merely imprecise, they are impossible
+
+Before filtering, the "average green taxi trip" is:
+
+- **19.02 miles** long
+- at an average speed of **81.31 mph**
+- with a longest trip of **278,990 miles** — eleven times around the planet
+
+A few hundred rows do that. Filter and you get **3.09 miles at 11.87 mph** —
+recognisably a city. Same data, same database, one `WHERE` clause.
+
+The second half of this one took longer to see. Having built the filter, the
+tempting thing is `WHERE QualityIssueCount = 0`, and it *looks* right — the numbers
+come back plausible. But it answers a different question than the one asked, and
+[the relevance model](#the-relevance-model-which-rows-a-figure-may-ignore) is what
+came out of noticing. `cleaning_impact()` now reports all three columns side by
+side, on the front page of the dashboard, rather than quietly showing the good
+numbers:
+
+| Metric | No filter | Blunt filter | Selective |
+|---|---|---|---|
+| trips | 787,060 | 598,358 | **784,808** |
+| avg_miles | 19.02 | 2.88 | **3.09** |
+| avg_minutes | 19.6 | 14.6 | **15.3** |
+| avg_mph | 81.31 | 11.73 | **11.87** |
+| max_miles | 278,990.28 | 96.26 | **111.66** |
+| avg_fare | $18.33 | $17.35 | **$18.37** |
+| avg_tip_pct | 14.60% | 14.49% | **13.88%** |
+
+Two things to read off that table. The blunt filter's average fare, $17.35, is
+*below* the unfiltered figure, which should be suspicious — the outliers it removed
+were high-value, so how did the average fall? Because it also removed 180,000 rows
+for reasons unrelated to fares, and those rows carry higher fares than average.
+
+And `max_miles` makes it concrete. The blunt filter's longest trip is 96.26 miles.
+The selective one finds a **111.66-mile, 203-minute, $400** trip — about 33 mph
+average, an entirely ordinary long-haul run — whose *only* flag is `unknown_zone`.
+It was excluded from a distance figure because its drop-off point is missing from
+the lookup table.
+
+### Performance
+
+#### 18. My own slow stage
+
+`cast_and_enrich` takes 71 of the pipeline's 90 seconds. The cause is mine, not
+IRIS's: each row's two timestamps are re-parsed by `TO_TIMESTAMP` for *every*
+derived column that needs them — `TripMinutes`, `AvgMph`, `PickupDate`,
+`PickupHour`, `PickupDayOfWeek`, `PickupMonth` — roughly ten parses per row where
+two would do. Staging the parsed timestamps first, then deriving from those,
+should cut it substantially. Not done; see [limitations](#known-limitations).
+
+### Tooling (my environment, not IRIS)
+
+Included for completeness, and because they shaped how the UI got verified.
+
+#### 19. No JavaScript runtime for the palette validator
+
+The visualization guidance I followed requires *running* a colour-blindness
+validator rather than eyeballing the palette. There is no `node`, `deno` or `bun`
+on this machine.
+
+Resolved rather than skipped: macOS ships JavaScriptCore, reachable as
+`osascript -l JavaScript`. Stripping the ES-module `export` keywords lets the
+validator run as a plain function body, and both its auto-run blocks are guarded
+on `process`/`document` so neither fires. The palette (categorical slots 1–3 plus
+the blue sequential ramp) **passes every hard gate in both light and dark mode**
+under the strictest all-pairs setting — worst CVD ΔE 9.2 light / 9.4 dark against
+a target of 8.0, worst normal-vision ΔE 24.0 light / 20.9 dark against a floor of
+15.0.
+
+Slot 3 (aqua `#1baf7a`) arrived with the bench panel's third arm and is the one
+value that trips a WARN rather than a PASS: 2.74:1 against this light surface,
+under the 3:1 line. That is a documented conditional relief, not a dismissable
+one — it is legal only with visible labels or a table view. The single figure that
+uses the slot has both (direct value labels on every column, and the figure's own
+table underneath), so the condition is met rather than ignored. Re-running the
+validator is one command:
+
+```
+$ osascript -l JavaScript /tmp/pal.js     # loads static/validate_palette.js, strips `export`
+=== light / all  ok=true
+   ["CVD separation","pass","worst all-pairs #1baf7a↔#eb6834 ΔE 9.2 (deutan)"]
+   ["Contrast vs surface","relief","below 3:1 — relief required: [[\"#1baf7a\",2.74]]"]
+```
+
+#### 20. Headless Chrome is blocked, so the UI got a different kind of check
+
+`--headless --screenshot` and `--dump-dom` both exit 0 with empty output on this
+machine (corporate policy, almost certainly). So instead of looking at a
+screenshot, `tools/render_check.js` builds a small DOM shim and **executes every
+panel's render path** against real captured API payloads, asserting no runtime
+errors, no non-finite SVG geometry, and no element ids that `index.html` does not
+define.
+
+```
+$ osascript -l JavaScript tools/render_check.js
+  overview    282 nodes   5 svg    18 marks    6 bars   0 tables
+  quality     214 nodes   0 svg     0 marks   26 bars   0 tables
+  zones       289 nodes   0 svg     0 marks   36 bars   1 tables
+  time        421 nodes   5 svg   213 marks    0 bars   0 tables
+  browse      379 nodes   0 svg     0 marks    0 bars   1 tables  103 tested cells
+  bench       157 nodes   1 svg     9 marks    3 bars   2 tables
+  pairs       215 nodes   0 svg     0 marks   15 bars   1 tables
+PASSED — no runtime errors, no non-finite geometry, no missing ids.
+```
+
+The mark counts reconcile exactly, which is the point of printing them — `time`'s
+213 = 24 hour bars + 1 speed line + 7 weekday bars + 12 month bars + 168 heatmap
+cells + 1 hover marker, and `bench`'s 9 = 3 questions × 3 arms (it was 6 before
+Embedded Python became the third arm, and drops back to 6 if the server has no
+pandas — a path worth running the shim against, which is how I know the panel
+degrades to two series instead of throwing).
+
+**It earned its keep immediately**: it caught a real bug in `niceTicks()`, where
+the top axis tick could land *below* the data maximum, so the tallest bar in
+every chart would have been drawn past the top of its plot area. That is a defect
+I would probably have seen in a screenshot and *definitely* would have shrugged
+at as a styling quirk.
+
+The honest caveat: a shim proves the code runs and the numbers are sane. It says
+nothing about whether two axis labels overlap. That check is still outstanding —
+see [limitations](#known-limitations).
+
+---
+
+## What worked well
+
+The presentation asks what worked, and plenty did:
+
+- **`LOAD DATA` is genuinely excellent.** 787,060 rows in 0.72 seconds, one
+  statement, no chunking logic, no progress bar needed. Once past #4 and #6 it
+  was the least troublesome part of the project.
+- **DB-API compliance is real.** `iris.connect()` behaves like `sqlite3`. `?`
+  markers, cursors, `description`, `rowcount`, context managers — all as you
+  expect. Almost all of `db.py` is boilerplate I did not have to think about.
+- **`INSERT ... SELECT` for the whole cast/derive/enrich stage** is a genuinely
+  better pattern than pulling rows into Python, and it was easy to express.
+- **Bitmap indexes** are a good fit for exactly this shape of data and made the
+  low-cardinality `GROUP BY`s fast without any tuning on my part.
+- **`%SQL_Diag.Result` / `%SQL_Diag.Message`** give real per-row load
+  diagnostics. Not needed in the end — the all-VARCHAR landing table means
+  nothing fails — but good to know they are there.
+- **`DROP TABLE IF EXISTS`, `TUNE TABLE`, `ISNUMERIC`, `DATEDIFF`, `DATEPART`,
+  `DAYOFWEEK`** all did what the name says on the first try.
+- **The generated-DDL approach paid off.** Because `schema.py` reads the rule
+  registry, adding a fourteenth rule required editing one list.
+
+---
+
+## Findings in the data
+
+| | |
+|---|---|
+| Rows in file | 787,060 |
+| Rows that failed to load | 0 |
+| Rows that failed to cast | 0 |
+| Trips passing all 14 rules | **598,358 (76.02%)** |
+| Trips with 1 issue | 138,251 (17.57%) |
+| Trips with 2 issues | 46,170 (5.87%) |
+| Trips with 3+ issues | 4,281 (0.54%) |
+| Pickup zones seen | 252 of 265 |
+| Trips usable for a *fare* figure | **784,778 (99.71%)** |
+| Trips usable for a *distance* figure | 741,533 (94.22%) |
+| Trips usable for a *fee-breakdown* figure | 669,798 (85.10%) |
+
+Those last three are the point of the [relevance
+model](#the-relevance-model-which-rows-a-figure-may-ignore): 76.02% is the fraction
+of rows with *nothing at all* wrong, and almost no figure needs that. The average
+fare rests on 99.71% of the file, not 76%.
+
+The average trip, on the rows that can speak to it: **3.09 miles**, **15.3
+minutes**, **11.87 mph**, **$18.37**, tipping **13.88%** on card. Note that $18.37
+is *higher* than the unfiltered $18.33 and much higher than the blunt filter's
+$17.35 — see [#17](#17-unfiltered-averages-are-not-merely-imprecise-they-are-impossible).
+
+Top flags: `total_mismatch` 115,015 (14.6%), `missing_passenger_count` 61,756
+(7.8%), `non_positive_distance` 39,494 (5.0%), `unknown_zone` 9,598 (1.2%). At
+the other end, `outside_2023` catches **7** rows — the earliest recorded pickup
+in this 2023 file is dated 2008-12-31. The two largest flags are also the two
+narrowest in effect: `total_mismatch` invalidates only `fee_breakdown` and
+`missing_passenger_count` only `passengers`, so between them they remove 176,769
+rows from two figures and none from the other twelve.
+
+Substantive findings are in the friction log above, because for this project
+finding them *was* the friction: [#16](#16-146-of-rows-do-not-reconcile--and-it-is-the-file-not-the-rule)
+(the fee-recording defect), [#17](#17-unfiltered-averages-are-not-merely-imprecise-they-are-impossible)
+(outliers make raw averages impossible), and
+[#14](#14-a-55613-row-block-with-three-fields-systematically-missing) (one
+upstream system's missing-field block).
+
+One more worth stating: **cash tips are never metered**, so a cash row's
+`tip_amount` is essentially always zero. Reading tip percentage without splitting
+by payment type says the outer boroughs do not tip. They do; they pay cash. This
+is why `tipping_by_borough()` groups by payment type — a data-collection artefact
+masquerading as a behavioural finding.
+
+---
+
+## The stretch goal: IRIS SQL vs pandas vs Embedded Python
+
+The guide asks how doing the filtering and aggregation in IRIS compares to
+pulling everything into Python: how much data moves, which is easier to
+maintain, which scales. `bench.py` answers it by measurement, and the dashboard's
+last tab runs it live.
+
+### Aggregation
+
+Each question is answered three ways:
+
+1. **IRIS SQL** — `GROUP BY` in the database; a few dozen rows come back.
+2. **Host pandas** — `SELECT` the raw columns for all 787,060 rows and reduce
+   them in pandas in the client process.
+3. **Embedded Python** — that *same* pandas reducer, running inside the IRIS
+   process, fed by `iris.sql.exec(...).dataframe()` with no driver and no wire.
+
+**Every answer is asserted equal to the IRIS-side answer with
+`pd.testing.assert_frame_equal` before any timing is reported**, because a faster
+wrong answer is not a result. All three arms agree on all three questions.
+
+The third arm is there to split a variable the first two confound. Host pandas
+loses to `GROUP BY` for two reasons at once — 787k rows cross the driver, *and*
+every row has to be materialised in Python — and the two-arm version of this
+benchmark cannot say which reason dominates. Embedded Python removes only the
+first.
+
+| Question | IRIS SQL | Host pandas | Embedded Python | pandas ÷ IRIS | Rows moved | Ratio |
+|---|---|---|---|---|---|---|
+| Revenue by pickup borough | 0.030s | 0.704s | 0.903s | **23.7×** | 8 vs 787,060 | 98,382× |
+| Trips & distance by hour | 0.023s | 0.644s | 0.786s | **28.0×** | 24 vs 787,060 | 32,794× |
+| Distribution of issue counts | 0.007s | 0.310s | 0.603s | **42.0×** | 6 vs 787,060 | 131,177× |
+
+*(median of 2 runs; the embedded arm returns the same 8/24/6 answer rows the IRIS
+arm does, having scanned all 787,060 in-process)*
+
+**Embedded Python is slower than host pandas here, and that is the finding.**
+Being closer to the data bought nothing, because the wire was never the
+bottleneck. Its own split of the time says so:
+
+| Question | pandas fetch | pandas reduce | embedded fetch | embedded reduce |
+|---|---|---|---|---|
+| Revenue by pickup borough | 0.645s | 0.055s | 0.705s | 0.033s |
+| Trips & distance by hour | 0.592s | 0.050s | 0.635s | 0.010s |
+| Distribution of issue counts | 0.306s | 0.005s | 0.463s | 0.005s |
+
+Both pandas arms spend 90–98% of their time turning 787,060 rows into a frame
+and hundredths of a second reducing it. On this host the driver does that
+marshalling slightly *faster* than `iris.sql`'s in-process DataFrame build, so
+removing the network — which, with the container on the same machine, is loopback
+and nearly free — leaves the embedded arm holding the same row-by-row cost with
+no compensating win. The 23–42× that `GROUP BY` wins by is not a
+transport number at all: it is the cost of materialising every row in Python,
+wherever the interpreter happens to live.
+
+Two things this does *not* say. Across a real network the ranking of arms 2 and 3
+would shift, because the wire that is nearly free here would not be; the
+measurement above is honest about one deployment, not all of them. And Embedded
+Python is not thereby useless — it is the right tool when the work genuinely
+cannot be expressed in SQL (a scikit-learn model, a bespoke parser) and you want
+it next to the data. It is the wrong tool for an aggregation SQL already does.
+
+The two pandas arms run the same code by construction, not by inspection:
+`bench.py` builds the `LANGUAGE PYTHON` function body with
+`inspect.getsource(comparison.reduce_in_pandas)`, so the reducer inside IRIS is
+the source text of the function object the host arm calls. They cannot drift.
+
+### Ingest
+
+| Approach | Rows/second | vs `LOAD DATA` |
+|---|---|---|
+| IRIS `LOAD DATA` (server-side) | 237,160 | — |
+| Python `executemany`, batches of 5,000 | 105,366 | 2.3× slower |
+| Python, one `INSERT` per row | 6,620 | **36× slower** |
+
+### What I conclude
+
+**On speed:** IRIS-side wins, by 24–42× on aggregation, and it wins for a reason
+worth naming precisely: not because the rows travel, but because they are
+materialised one at a time in Python at all. Embedded Python demonstrates that by
+removing the travel and still losing. But the ingest table is
+the more useful result, because it shows the axis that actually matters is
+**batched versus not**, more than Python versus SQL. Batched `executemany` is
+only 2.3× behind a purpose-built parallel bulk loader — perfectly reasonable.
+The row-at-a-time loop, which is the obvious first thing anyone writes, is 36×
+behind. If you take one number away, take that one.
+
+**On data movement:** this is the bigger deal, and it is the argument that keeps
+working as the data grows. Answering "revenue by borough" needs **eight rows** of
+answer. Moving 787,060 rows to compute it means the driver, the network and the
+Python process all handle ~98,000× more data than the question requires. The
+speed difference is a symptom; the transferred volume is the cause.
+
+**On maintainability:** genuinely mixed, and I do not think the honest answer is
+"IRIS wins".
+
+- The SQL version is shorter and states the intent directly.
+- The pandas version is easier to *debug*, because you can look at the
+  intermediate frame.
+- SQL in Python strings gets no syntax checking until it runs, and the four
+  reserved-word and collation problems above (#9, #11) were all "valid Python,
+  invalid or surprising SQL, discovered at runtime".
+- The hybrid this project settled on — **rules and thresholds as Python data,
+  compiled to SQL** — is the part I would actually defend. `quality.py` reads
+  like a specification, and it executes as a single server-side pass. That is
+  better than either pure alternative.
+
+**On scaling:** the IRIS-side approach is bounded by the data on disk; the
+Python-side approach is bounded by RAM. At 787k rows both fit comfortably. At
+50× this file, one still works unchanged and the other needs chunking logic that
+is itself a source of bugs. That is not a speed argument, it is a "does it work
+at all" argument.
+
+**One caveat I should flag rather than bury:** the ingest table's
+*projected-full-file* column extrapolates a 50,000-row rate to 787,060 rows, and
+that flatters nobody consistently — `LOAD DATA` pays a fixed setup cost and
+parallelises better on bigger files, so its projection (3.3s) is over three times
+worse than the *measured* full-file load (0.72s). The measured subset rates are
+sound; the extrapolation is a guide, and the dashboard says so on the figure.
+
+---
+
+## Recommendations for the next cohort
+
+Ordered by how much time they would save, most first.
+
+1. **Ship a working `docker-compose.yml` + `Dockerfile` with the guide.** With
+   passwords un-expired and `%Service_CallIn` enabled. This single artefact
+   removes friction #1, #2 and #3 — over an hour, before anyone writes a line of
+   interesting code. Nobody's first IRIS experience should be
+   `Security.Users.UnExpireUserPasswords`.
+
+2. **Document the `LOAD DATA` + DB-API brace conflict, or fix it.** Friction #4
+   cost the most, and the error message actively misdirects. `LOAD DATA` from
+   Python with `header:1` is not an exotic path — it is the obvious first thing
+   to try. Ideally the driver should not apply ODBC escape parsing to a clause
+   the server reads as JSON.
+
+3. **Put the `SQLUPPER` collation default in the first SQL tutorial.** Friction
+   #11 is silent, it corrupts presentation output, and it will surprise every
+   developer arriving from another database. One paragraph and a `COLLATE
+   SQLSTRING` example prevents it.
+
+4. **Make `LOAD DATA` warn about an apparent header row.** Friction #6 produced
+   no error at all, and the landing-table pattern that makes loads robust is
+   exactly what stops you noticing. A one-line warning would do.
+
+5. **Add a "which API for which job" table to the driver docs.** DB-API vs
+   Native, and the specific things only the latter can do.
+
+6. **Link the reserved-word list from the SQL getting-started page.** `HOUR` and
+   `MONTH` are not words anyone expects to be reserved.
+
+7. **Say `import iris` in the install instructions.** One line.
+
+8. **Consider giving the sample data a deliberate flaw list.** The thousands
+   separators, the empty `ehail_fee`, the 55,613-row missing-field block and the
+   fee-reconciliation defect made this project *much* more interesting than clean
+   data would have. I would keep them and not warn people — but a facilitator's
+   note listing them would help whoever runs the debrief know what to look for.
+
+9. **Ask the quality-workflow requirement to specify how the flags get used.**
+   This one is about the guide, not about IRIS. "Identify questionable records" is
+   naturally read as "and then exclude them," and that reading produces a *biased*
+   dashboard that looks careful — [the relevance
+   model](#the-relevance-model-which-rows-a-figure-may-ignore) is what it took to
+   undo it here. One sentence in the brief — *a flag is a statement about one
+   field, not a verdict on the row* — would put every team on the interesting side
+   of that question from the start.
+
+---
+
+## Known limitations
+
+Things I know are imperfect, stated rather than hidden.
+
+1. **`cast_and_enrich` is ~4× slower than it needs to be** (friction #18). Each
+   row's timestamps are parsed roughly ten times instead of two. The fix —
+   staging parsed timestamps, then deriving from those — is clear and untried.
+
+2. **The dashboard has not been looked at in a real browser by me.** Headless
+   Chrome is blocked here (friction #20), so I verified it by executing every
+   render path against real payloads with geometry assertions. That catches
+   crashes, NaNs and bad scales — it caught one real bug — but it cannot catch
+   overlapping axis labels or a chart that is technically correct and ugly.
+   **Someone should open it and look before it is presented.**
+
+3. **The dashboard caches every result in-process.** Correct while `Taxi.Trip` is
+   static, wrong if you re-run the pipeline behind a running server. Use
+   `POST /api/cache/clear`, or restart it.
+
+4. **`web.py` is Flask's development server**, single-process, no auth, bound to
+   localhost. Appropriate for a demo and nothing else.
+
+5. **Credentials are dev-only and in the repo.** `_SYSTEM`/`SYS` appear in
+   `Dockerfile` and `.env.example` deliberately, so setup is one command. `.env`
+   is git-ignored. This is fine for a throwaway container and would not be fine
+   for anything else.
+
+6. **`derive_thresholds()` is offered, not adopted.** It measures cutoffs from
+   the loaded data's upper 0.1% tail as an alternative to the hand-set
+   thresholds. I kept the hand-set ones, because a percentile always flags
+   exactly 0.1% of rows whether or not that 0.1% is wrong, whereas "no
+   green-taxi trip is twelve hours long" is a falsifiable claim about taxis. Both
+   are available so they can be compared: `cli quality --derive-thresholds`.
+
+7. **Rejected-row handling is untested in anger.** `Taxi.TripReject` exists and
+   the row-count reconciliation is enforced, but this file produces zero rejects,
+   so that path has never actually carried a row.
 
 ---
 
 ## File map
 
 ```
-run.sh                  the one command: compose up, wait for SQL, run src/run.py, open
-Dockerfile              IRIS Community Edition + Flask, expired-password fix, %Service_CallIn
-docker-compose.yml      ports 1972/52773; ./data:ro, ./src:ro, ./iris_out
-iris.script             dev-only bootstrap applied at build time
-docs/project_guide.md   the brief
+docs/project_guide.md         the assignment
 
-src/
-  run.py                the single entry point: stages 1-4, the SQL function, the
-                        web application; skips the load if Taxi.Trip is populated
-  db.py                 the SQL boundary: exec_sql/exec_dml/prepare/iter_rows,
-                        NULL translation, and the embedded-only import guard
-  rules.py              the 16 rules, MEASURE_RULES, unknown zones, CARD_PAYMENT
-  stage1_schema.py      tables, indexes, Python UDFs, the enriched view, rule seeding
-  stage2_load_raw.py    LOAD DATA for trips, Python insert for zones
-  stage3_cast.py        TripRaw -> Trip, rejects, ingest-phase observations, self-test
-  stage4_flag.py        rule predicates -> TripFlag, flag_count/flag_mask, TUNE, view check
-  stage5_procs.py       Taxi.apply_rules_now() — stage 4 as one SQL call
-  stage5_web.py         registers the Flask app as an IRIS-hosted WSGI application
-  analytics.py          the five terminal workflows + ad-hoc SQL
-  dashboard.py          every panel's SQL — one statement each — the Filters
-                        predicate builder, and the push-down experiment
-  _qtest.py             scratchpad, not part of the pipeline and imported by nothing
-  web/
-    taxi_app.py         Flask routes — thin: parse query string, call dashboard,
-                        JSON — plus the module reloader WSGIDebug does not do
-    static/             index.html, app.js (hand-rolled SVG charts), styles.css
+Dockerfile                    IRIS Community + the dev bootstrap (friction #2)
+iris.script                   un-expire passwords, enable %Service_CallIn
+docker-compose.yml            ports 1973/52774, ./data mounted read-only at /data
+requirements.txt              4 dependencies
+.env.example                  connection settings and container-side CSV paths
 
-tests/frontend/
-  run.sh, run.js        boot app.js against captured responses, assert the DOM
-  domshim.js            just enough DOM to run app.js outside a browser
-  fixtures/             real /taxi/api/* payloads, and how to refresh them
+src/taxi/
+  config.py      52   env loading, IrisConfig, table-name constants
+  db.py         188   the only module that talks to IRIS; exec_direct lives here
+  schema.py     230   DDL generated from Python, incl. one flag column per rule
+  load.py       137   server-side LOAD DATA with explicit column mapping
+  transform.py  245   cast + derive + enrich, as one INSERT ... SELECT
+  quality.py    535   14 rules as Python data, compiled to two UPDATEs;
+                      each rule declares the measures it invalidates
+  analytics.py  572   the user-facing workflows; IRIS aggregates, pandas labels
+  bench.py      375   the stretch goal, with correctness assertions
+  cli.py        185   info / pipeline / profile / quality / analyze / bench
+  web.py        328   JSON endpoints over analytics + quality; serves the page
+
+src/taxi/static/
+  index.html    107   the whole page skeleton
+  app.js       1504   hand-rolled SVG charts; no framework, no build, no CDN
+  styles.css    561   design tokens + layout; every colour is a named token
+  validate_palette.js   the colour validator, vendored so it can run in-browser
+
+tools/
+  render_check.js  340   executes every panel headlessly (friction #20)
+  fixtures/*.json        real captured API payloads it runs against
 ```
 
-**`tests/frontend/run.sh`** exists because of the failure that prompted this
-harness: a blank dashboard where every endpoint answered `200`. `app.js` threw on
-one key that had been renamed in `/api/meta`, `boot()` aborted part-way through, and
-the page kept its header and filters and lost every panel. No amount of `curl` shows
-that, and neither does a Python test — the only place it is visible is the DOM after
-`app.js` has run. So the harness loads the real `index.html` and `app.js` against
-real captured payloads and asserts on what came out: 5 KPI tiles, 168 heatmap cells,
-50 trip rows, marks inside each chart's `<svg>`, and that the push-down tab fetches
-*nothing* until its button is pressed.
+### Why the front end is hand-written
 
-It runs on `jsc`, which ships with macOS inside JavaScriptCore, so there is nothing
-to install and no `node_modules`. The cost is `domshim.js`: a few hundred lines of
-element tree, a small HTML parser and the handful of CSS selectors `app.js` uses.
-Worth it for a page that is otherwise only testable by looking at it.
+Three reasons, in order of how much they mattered:
 
-`_qtest.py` is run the same way as the stages
-(`irispython _qtest.py`) and is where a one-off query goes while working out a rule
-threshold or checking a distribution. Its contents are whatever the last question
-was; nothing depends on it.
+1. **It has to work in a room, on a laptop, on demand.** A CDN `<script>` tag is
+   a single point of failure five minutes before a presentation. There is no
+   network dependency and no build step: `python -m taxi.web` and it works.
+2. **The charts needed are a column chart, a line chart, a heatmap and a ranked
+   bar list.** That is about 200 lines of SVG.
+3. **Every mark specification the design guidance asks for** — thin bars, 4px
+   rounded data-ends, 2px lines, a 2px surface gap between adjacent fills,
+   recessive gridlines, a table view behind every figure, no dual-axis charts —
+   is easier to satisfy directly than to talk a charting library out of its
+   defaults.
+
+Colour is never written as a hex in `app.js`; marks reference CSS custom
+properties by role, so light and dark swap in one place and the palette stays
+auditable in a single file.

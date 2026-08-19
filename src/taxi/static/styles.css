@@ -1,0 +1,597 @@
+/* Design tokens.
+ *
+ * Every colour below is taken verbatim from the data-viz reference palette --
+ * categorical slots 1 and 2 (blue, orange), the blue sequential ramp for the
+ * heatmap, the fixed status palette for rule severity, and the documented chrome
+ * and ink roles. Nothing here is a hand-picked hex.
+ *
+ * No chart uses more than three categorical series, so only slots 1-3 are
+ * defined; those are the validated leading three of the default order. This page is
+ * light-surface only: `color-scheme: light` pins the form controls too, so the
+ * OS dark setting cannot repaint the checkboxes out from under the palette.
+ */
+
+:root {
+  color-scheme: light only;
+
+  --surface-1: #fcfcfb;          /* chart surface */
+  --page: #f9f9f7;               /* page plane */
+  --ink-primary: #0b0b0b;
+  --ink-secondary: #52514e;
+  --ink-muted: #898781;          /* axis ticks, small labels */
+  --grid: #e1e0d9;               /* hairline gridline */
+  --axis: #c3c2b7;               /* baseline */
+  --border: rgba(11, 11, 11, 0.10);
+  --hover-wash: rgba(11, 11, 11, 0.04);
+
+  --series-1: #2a78d6;           /* categorical slot 1, blue */
+  --series-2: #eb6834;           /* categorical slot 2, orange */
+  /* Slot 3, aqua: the third arm of the bench comparison (embedded Python). It
+   * clears every hard gate in both modes but sits at 2.74:1 against this
+   * surface, under the 3:1 line. The documented relief is visible labels or a
+   * table view; the only figure that uses it has both. */
+  --series-3: #1baf7a;           /* categorical slot 3, aqua */
+
+  --seq-100: #cde2fb;
+  --seq-200: #9ec5f4;
+  --seq-300: #6da7ec;
+  --seq-400: #3987e5;
+  --seq-500: #256abf;
+  --seq-600: #184f95;
+  --seq-700: #0d366b;
+
+  /* The heatmap's sequential scale, as seven ordered steps of the one blue hue.
+   * Near-zero must recede *toward the surface*, so on this light surface step 1
+   * is the lightest blue and step 7 the darkest. */
+  --ramp-1: var(--seq-100);
+  --ramp-2: var(--seq-200);
+  --ramp-3: var(--seq-300);
+  --ramp-4: var(--seq-400);
+  --ramp-5: var(--seq-500);
+  --ramp-6: var(--seq-600);
+  --ramp-7: var(--seq-700);
+
+  /* Status is fixed -- never themed, never reused as a series colour. */
+  --status-good: #0ca30c;
+  --status-warning: #fab219;
+  --status-serious: #ec835a;
+  --status-critical: #d03b3b;
+
+  /* The wash behind a cell a quality rule actually read: --status-warning at 22%.
+   * It points, it does not grade -- see table.data td.tested. */
+  --flag-wash: rgba(250, 178, 25, 0.22);
+
+  --radius: 10px;
+  --sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+
+  /* The content column, and the side padding that centres it. The header bar and
+   * the tab bar stay full-bleed -- only their *contents* are inset -- so the
+   * title, the tabs and the first figure all share one left edge at any width,
+   * and on a wide monitor the page sits in the middle instead of hugging the
+   * left. Below 1240 + 48 the gutter bottoms out at 24px and nothing is cropped. */
+  --content: 1240px;
+  --gutter: max(24px, calc((100% - var(--content)) / 2));
+}
+
+/* -------------------------------------------------------------- shell */
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: var(--sans);
+  background: var(--page);
+  color: var(--ink-primary);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+header.top {
+  display: flex;
+  align-items: baseline;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 20px var(--gutter) 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-1);
+}
+
+header.top h1 {
+  margin: 0;
+  font-size: 19px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+header.top .sub {
+  color: var(--ink-secondary);
+  font-size: 13px;
+}
+
+header.top .spacer { flex: 1 1 auto; }
+
+button {
+  font: inherit;
+  color: var(--ink-primary);
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 5px 11px;
+  cursor: pointer;
+}
+
+button:hover { background: var(--hover-wash); }
+button:focus-visible { outline: 2px solid var(--series-1); outline-offset: 2px; }
+button[disabled] { opacity: 0.5; cursor: default; }
+
+/* -------------------------------------------------------------- tabs */
+
+nav.tabs {
+  display: flex;
+  gap: 2px;
+  padding: 0 var(--gutter);
+  background: var(--surface-1);
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+}
+
+nav.tabs button {
+  border: none;
+  border-radius: 0;
+  background: none;
+  padding: 10px 14px;
+  color: var(--ink-secondary);
+  border-bottom: 2px solid transparent;
+  white-space: nowrap;
+}
+
+nav.tabs button[aria-selected="true"] {
+  color: var(--ink-primary);
+  font-weight: 600;
+  border-bottom-color: var(--series-1);
+}
+
+/* -------------------------------------------------------------- layout */
+
+main { padding: 20px var(--gutter) 64px; }
+
+.panel[hidden] { display: none; }
+
+.controls {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 18px;
+  padding: 10px 14px;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.controls label {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--ink-secondary);
+  cursor: pointer;
+}
+
+.controls .note { color: var(--ink-muted); font-size: 12px; }
+
+.controls select {
+  font: inherit;
+  color: var(--ink-primary);
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 4px 8px;
+  cursor: pointer;
+}
+
+.controls select:focus-visible { outline: 2px solid var(--series-1); outline-offset: 2px; }
+
+.grid {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  margin-bottom: 16px;
+}
+
+.grid.thirds { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+
+/* The headline tiles, all on one row. A 240px floor fitted only four across the
+ * content column, so the six of them broke 4 + 2 and read as two unrelated
+ * groups; 168px fits all six and still folds to 3 + 3 and then 2 + 2 + 2 as the
+ * window narrows. */
+.grid.tiles { grid-template-columns: repeat(auto-fit, minmax(168px, 1fr)); }
+
+.full { grid-column: 1 / -1; }
+
+/* -------------------------------------------------------------- figures */
+
+figure.card {
+  margin: 0;
+  padding: 14px 16px 12px;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  min-width: 0;
+}
+
+figure.card figcaption { margin-bottom: 2px; }
+
+figure.card .title {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: -0.005em;
+}
+
+figure.card .subtitle {
+  font-size: 12px;
+  color: var(--ink-secondary);
+  margin-top: 1px;
+}
+
+.legend {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin: 8px 0 2px;
+  font-size: 12px;
+  color: var(--ink-secondary);
+}
+
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+
+.legend i {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  background: var(--series-1);
+  flex: none;
+}
+
+.plot { margin-top: 8px; }
+.plot svg { display: block; width: 100%; height: auto; overflow: visible; }
+
+.fig-foot {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  row-gap: 6px;                  /* after the shorthand, or it is overwritten */
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--grid);
+  font-size: 12px;
+  color: var(--ink-muted);
+}
+
+/* The buttons travel together and are pushed right by their own auto margin
+ * rather than by a flex spacer: a growing spacer plus wrapping puts the buttons
+ * on a line of their own even when they would have fitted beside the note. */
+.fig-actions {
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.fig-foot .note-text { min-width: 0; }
+
+.fig-foot button {
+  font-size: 12px;
+  padding: 3px 9px;
+  color: var(--ink-secondary);
+  white-space: nowrap;
+}
+
+/* -------------------------------------------------------------- expanded */
+
+/* The expanded figure is the *same* card node, moved into this overlay and moved
+ * back on close. That is why the chart keeps working: its ResizeObserver is still
+ * attached, so the new width redraws it, and app.js hands it a new height to
+ * match -- an expanded chart is re-laid-out, not scaled up. */
+.overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(11, 11, 11, 0.34);
+}
+
+.overlay[hidden] { display: none; }
+
+figure.card.expanded {
+  width: min(1180px, 100%);
+  max-height: calc(100vh - 48px);
+  overflow: auto;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.22);
+}
+
+/* Leaves the grid cell the width it had, so the page behind does not reflow. */
+.card-slot { min-width: 0; }
+
+body.modal-open { overflow: hidden; }
+
+/* -------------------------------------------------------------- svg roles */
+
+.gridline { stroke: var(--grid); stroke-width: 1; shape-rendering: crispEdges; }
+.baseline { stroke: var(--axis); stroke-width: 1; shape-rendering: crispEdges; }
+
+.tick {
+  fill: var(--ink-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.datalabel { fill: var(--ink-secondary); font-size: 11px; font-weight: 600; }
+.axis-title { fill: var(--ink-muted); font-size: 11px; }
+
+.mark { transition: opacity 120ms ease; }
+.plot:hover .mark { opacity: 0.55; }
+.plot:hover .mark.active { opacity: 1; }
+.crosshair { stroke: var(--axis); stroke-width: 1; pointer-events: none; }
+
+.marker {
+  stroke: var(--surface-1);      /* 2px surface ring on overlapping marks */
+  stroke-width: 2;
+}
+
+.cell { stroke: var(--surface-1); stroke-width: 2; }
+
+/* -------------------------------------------------------------- hero + tiles */
+
+.hero {
+  padding: 18px 20px;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.hero .label {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ink-muted);
+}
+
+.hero .value {
+  font-size: clamp(34px, 6vw, 54px);
+  font-weight: 680;
+  line-height: 1.05;
+  letter-spacing: -0.03em;
+  margin-top: 2px;
+}
+
+.hero .caption {
+  margin-top: 6px;
+  color: var(--ink-secondary);
+  max-width: 62ch;
+}
+
+.tile {
+  padding: 12px 14px;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.tile .label { font-size: 12px; color: var(--ink-secondary); }
+
+.tile .value {
+  font-size: 24px;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  margin-top: 2px;
+}
+
+.tile .hint { font-size: 12px; color: var(--ink-muted); margin-top: 1px; }
+
+/* -------------------------------------------------------------- tables */
+
+.table-wrap { overflow-x: auto; margin-top: 10px; }
+
+table.data {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+
+/* Padding is symmetric so that a shaded cell is centred on the value it shades.
+ * With the gap all on one side, the wash started flush against the digits and ran
+ * 10px past them into the next column, so every highlight looked a column-gap out
+ * of step with the header above it. The outer edges keep their zero padding, so
+ * the table still starts and ends on the card's own margins. */
+table.data th,
+table.data td {
+  text-align: left;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--grid);
+  white-space: nowrap;
+}
+
+table.data th:first-child,
+table.data td:first-child { padding-left: 0; }
+
+table.data th:last-child,
+table.data td:last-child { padding-right: 0; }
+
+table.data th {
+  color: var(--ink-muted);
+  font-weight: 600;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  position: sticky;
+  top: 0;
+  background: var(--surface-1);
+}
+
+/* A numeric column is right-aligned in the body, so its header has to be too --
+ * otherwise the label sits over the left edge of a column of digits that ends at
+ * the right edge, and nothing lines up. */
+table.data th.num { text-align: right; }
+
+table.data td.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The cell the rule that fired actually read. A pointer, not a status: the rules
+ * are named in the Flags column on the same row, so the wash is never the only
+ * thing carrying the meaning.
+ *
+ * The wash alone, with no rule or bar down one edge. An edge marker has to pick a
+ * side, and a 2px line on the left of a right-aligned number sits at the far end
+ * of the column from the digits it is meant to be pointing at -- it read as a
+ * table border that had come loose rather than as emphasis. */
+table.data td.tested { background: var(--flag-wash); }
+
+table.data tbody tr:hover { background: var(--hover-wash); }
+table.data tbody tr.clickable { cursor: pointer; }
+table.data tbody tr[aria-selected="true"] { background: var(--hover-wash); }
+
+/* -------------------------------------------------------------- ranked bars */
+
+.ranked { margin-top: 10px; }
+
+.ranked .row {
+  display: grid;
+  grid-template-columns: minmax(96px, 34%) 1fr auto;
+  align-items: center;
+  gap: 10px;
+  padding: 3px 0;
+}
+
+.ranked .row.clickable { cursor: pointer; }
+.ranked .row:hover { background: var(--hover-wash); }
+
+.ranked .name {
+  color: var(--ink-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ranked .track { height: 14px; }
+
+.ranked .bar {
+  height: 14px;                  /* thin mark, well under the 24px cap */
+  border-radius: 0 4px 4px 0;    /* 4px rounded data-end, square at baseline */
+  background: var(--series-1);
+  min-width: 2px;
+}
+
+.ranked .val {
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-secondary);
+  font-weight: 600;
+  min-width: 6ch;
+  text-align: right;
+}
+
+/* Status carries meaning only alongside its icon + word. */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--ink-secondary);
+  white-space: nowrap;
+}
+
+.chip .glyph { font-size: 10px; line-height: 1; }
+.chip.error .glyph { color: var(--status-critical); }
+.chip.warn .glyph { color: var(--status-warning); }
+
+/* -------------------------------------------------------------- misc */
+
+.tooltip {
+  position: fixed;
+  z-index: 50;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 90ms ease;
+  background: var(--surface-1);
+  color: var(--ink-primary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.16);
+  padding: 8px 10px;
+  font-size: 12px;
+  max-width: 280px;
+}
+
+.tooltip.on { opacity: 1; }
+.tooltip .t-title { font-weight: 650; margin-bottom: 3px; }
+
+.tooltip .t-row {
+  display: flex;
+  gap: 10px;
+  color: var(--ink-secondary);
+}
+
+.tooltip .t-row .v {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-primary);
+  font-weight: 600;
+}
+
+.prose {
+  color: var(--ink-secondary);
+  max-width: 78ch;
+  margin: 0 0 14px;
+}
+
+.prose strong { color: var(--ink-primary); }
+
+.status-msg { color: var(--ink-muted); padding: 12px 0; }
+.status-msg.bad { color: var(--status-critical); }
+
+.ramp-legend {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--ink-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.ramp-legend .strip {
+  height: 8px;
+  width: 140px;
+  border-radius: 4px;
+  background: linear-gradient(
+    to right,
+    var(--ramp-1), var(--ramp-3), var(--ramp-5), var(--ramp-7)
+  );
+}
+
+kbd {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px;
+  background: var(--hover-wash);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; }
+}
+
+/* The texture channel: forced-colors and print lose the fills, so marks fall
+ * back to outlines and every figure keeps its table view reachable. */
+@media (forced-colors: active) {
+  .ranked .bar, .mark { forced-color-adjust: none; border: 1px solid CanvasText; }
+  /* The wash disappears here, so the pointer becomes the one thing
+   * forced-colors keeps: an outline. */
+  table.data td.tested { forced-color-adjust: none; outline: 2px solid CanvasText; }
+}

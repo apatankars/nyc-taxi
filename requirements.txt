@@ -1,14 +1,18 @@
-# InterSystems IRIS Python driver. Imports as `iris`, not `intersystems_irispython`.
-# Provides both the DB-API interface (iris.connect) and the Native API
-# (iris.createConnection / iris.createIRIS). Verified working on Python 3.9.6.
+# InterSystems IRIS Python driver. Note that it imports as `iris`, not as
+# `intersystems_irispython`. Provides both the DB-API interface (iris.connect)
+# and the Native API (iris.createConnection). Verified on Python 3.9.6.
 intersystems-irispython==5.4.0
 
-# Analysis + presentation layer.
-pandas>=2.0            # 2.3.3 verified on Python 3.9.6
-matplotlib>=3.5
+# Analysis and presentation. Every DataFrame in this project is built from an
+# already-aggregated IRIS result set, so pandas handles hundreds of rows, not
+# hundreds of thousands -- except in bench.py, where pulling everything into
+# pandas is the point of the comparison.
+pandas>=2.0
 
-# Notebook interface — the lowest-risk way to demo results.
-jupyterlab>=4.0
+# The dashboard. Flask serves a handful of JSON endpoints and three static
+# files; there is no front-end build step, no bundler and no CDN dependency, so
+# this is the only dependency the interface adds.
+flask>=3.0
 
-# Keeps the IRIS host/port/credentials out of source files.
+# Keeps IRIS host/port/credentials out of source files.
 python-dotenv>=1.0

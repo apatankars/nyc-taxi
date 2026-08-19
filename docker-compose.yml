@@ -3,18 +3,19 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: nyc-taxi-iris
+    container_name: taxi-insights-iris
     restart: unless-stopped
     ports:
-      # host:container — pinned, so connection strings stay valid across restarts.
-      - "1972:1972"     # superserver: Python DB-API / Native API / JDBC / ODBC
-      - "52773:52773"   # web: Management Portal + REST
+      # Host ports are offset by one from the IRIS defaults (1972 / 52773)
+      # because another IRIS container on this machine already holds those.
+      # Change both sides of the colon together if you want the defaults back;
+      # the host half is what .env must agree with.
+      - "1973:1972"     # superserver: Python DB-API, Native API, JDBC, ODBC
+      - "52774:52773"   # web: Management Portal and REST
     volumes:
-      # Read-only: IRIS only needs to *read* the CSVs for server-side LOAD DATA.
-      # Inside the container these appear as /data/2023_Green_Taxi_Trip_Data.csv etc.
+      # Read-only. IRIS only ever *reads* these, during server-side LOAD DATA.
+      # Inside the container they appear as /data/<name>.csv, which is the path
+      # LOAD DATA statements must use -- not the host path.
       - ./data:/data:ro
-      # Writable scratch, for anything IRIS needs to export back out to you.
+      # Writable scratch, for anything we ask IRIS to export back out.
       - ./iris_out:/output
-      # Pipeline code, run in-process by irispython. Read-only: IRIS executes it,
-      # you edit it on the host, no rebuild needed between runs.
-      - ./src:/src:ro

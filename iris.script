@@ -1,15 +1,17 @@
-// Dev-only bootstrap, applied at image build time.
-// Two jobs, both described in the Dockerfile: clear the expired-password flag
-// that blocks the first driver login, and enable the call-in service that the
-// Native API and Embedded Python rely on.
+// Dev-only bootstrap, applied once at image build time.
+//
+// Both steps below exist to remove first-connection failures. Neither is
+// appropriate for anything but a local development instance.
 
 zn "%SYS"
 
-// Stock images ship _SYSTEM with the password flagged expired, which turns the
-// first DB-API connect into an auth failure instead of a session.
+// Stock IRIS images ship _SYSTEM with its password flagged as expired. That turns
+// the very first DB-API connect into an authentication error rather than a
+// session, which reads like a wrong-password bug and is not.
 do ##class(Security.Users).UnExpireUserPasswords("*")
 
-// %Service_CallIn is what lets irispython attach to the IRIS process.
+// %Service_CallIn is what allows the Native API and Embedded Python to attach to
+// the IRIS process. Disabled by default.
 set props("Enabled") = 1
 do ##class(Security.Services).Modify("%Service_CallIn", .props)
 
