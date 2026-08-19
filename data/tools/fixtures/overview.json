@@ -1,0 +1,238 @@
+{
+  "headline": {
+    "trips": 787060,
+    "clean_trips": 598358,
+    "pickup_zones": 252,
+    "first_pickup": "2008-12-31",
+    "last_pickup": "2023-12-31",
+    "total_revenue": 18749395,
+    "typical_miles": 3.09,
+    "typical_minutes": 15.3,
+    "typical_fare": 18.37
+  },
+  "cleaning_impact": [
+    {
+      "metric": "trips",
+      "depends_on": "trip_count",
+      "all_rows": 787060,
+      "strict_clean": 598358,
+      "selective": 784808
+    },
+    {
+      "metric": "avg_miles",
+      "depends_on": "distance",
+      "all_rows": 19.02,
+      "strict_clean": 2.88,
+      "selective": 3.09
+    },
+    {
+      "metric": "avg_minutes",
+      "depends_on": "duration",
+      "all_rows": 19.6,
+      "strict_clean": 14.6,
+      "selective": 15.3
+    },
+    {
+      "metric": "avg_mph",
+      "depends_on": "speed",
+      "all_rows": 81.31,
+      "strict_clean": 11.73,
+      "selective": 11.87
+    },
+    {
+      "metric": "max_miles",
+      "depends_on": "distance",
+      "all_rows": 278990.28,
+      "strict_clean": 96.26,
+      "selective": 111.66
+    },
+    {
+      "metric": "avg_fare",
+      "depends_on": "fare",
+      "all_rows": 18.33,
+      "strict_clean": 17.35,
+      "selective": 18.37
+    },
+    {
+      "metric": "avg_tip_pct",
+      "depends_on": "tip, fare",
+      "all_rows": 14.6,
+      "strict_clean": 14.49,
+      "selective": 13.88
+    }
+  ],
+  "issue_distribution": [
+    {
+      "issues": 0,
+      "trips": 598358,
+      "pct": 76.024
+    },
+    {
+      "issues": 1,
+      "trips": 138253,
+      "pct": 17.566
+    },
+    {
+      "issues": 2,
+      "trips": 46168,
+      "pct": 5.866
+    },
+    {
+      "issues": 3,
+      "trips": 3667,
+      "pct": 0.466
+    },
+    {
+      "issues": 4,
+      "trips": 601,
+      "pct": 0.076
+    },
+    {
+      "issues": 5,
+      "trips": 13,
+      "pct": 0.002
+    }
+  ],
+  "boroughs": [
+    {
+      "borough": "Manhattan",
+      "trips": 443751,
+      "avg_miles": 2.58,
+      "avg_fare": 15.52,
+      "avg_total": 21.42,
+      "avg_tip_pct": 15.8,
+      "revenue": 9502599
+    },
+    {
+      "borough": "Queens",
+      "trips": 205214,
+      "avg_miles": 3.48,
+      "avg_fare": 20.02,
+      "avg_total": 24.84,
+      "avg_tip_pct": 10.7,
+      "revenue": 5090982
+    },
+    {
+      "borough": "Brooklyn",
+      "trips": 110328,
+      "avg_miles": 4.04,
+      "avg_fare": 23.75,
+      "avg_total": 29.4,
+      "avg_tip_pct": 14.0,
+      "revenue": 3241034
+    },
+    {
+      "borough": "Bronx",
+      "trips": 15884,
+      "avg_miles": 4.39,
+      "avg_fare": 23.75,
+      "avg_total": 27.46,
+      "avg_tip_pct": 4.1,
+      "revenue": 435473
+    },
+    {
+      "borough": "Staten Island",
+      "trips": 89,
+      "avg_miles": 4.74,
+      "avg_fare": 38.52,
+      "avg_total": 44.97,
+      "avg_tip_pct": 11.4,
+      "revenue": 4003
+    },
+    {
+      "borough": "EWR",
+      "trips": 24,
+      "avg_miles": 8.36,
+      "avg_fare": 76.54,
+      "avg_total": 94.26,
+      "avg_tip_pct": 23.7,
+      "revenue": 2168
+    }
+  ],
+  "coverage": [
+    {
+      "measure": "trip_count",
+      "meaning": "that the row describes a trip that actually took place",
+      "rules": 1,
+      "usable_rows": 784808,
+      "pct_of_trips": 99.71
+    },
+    {
+      "measure": "location",
+      "meaning": "the pickup and drop-off zone and borough",
+      "rules": 1,
+      "usable_rows": 777462,
+      "pct_of_trips": 98.78
+    },
+    {
+      "measure": "time",
+      "meaning": "when the trip started -- hour, weekday, month",
+      "rules": 2,
+      "usable_rows": 786020,
+      "pct_of_trips": 99.87
+    },
+    {
+      "measure": "distance",
+      "meaning": "TripDistance",
+      "rules": 4,
+      "usable_rows": 741533,
+      "pct_of_trips": 94.22
+    },
+    {
+      "measure": "duration",
+      "meaning": "TripMinutes",
+      "rules": 5,
+      "usable_rows": 776404,
+      "pct_of_trips": 98.65
+    },
+    {
+      "measure": "speed",
+      "meaning": "AvgMph, which depends on both distance and duration",
+      "rules": 7,
+      "usable_rows": 737852,
+      "pct_of_trips": 93.75
+    },
+    {
+      "measure": "fare",
+      "meaning": "FareAmount",
+      "rules": 2,
+      "usable_rows": 784778,
+      "pct_of_trips": 99.71
+    },
+    {
+      "measure": "tip",
+      "meaning": "TipAmount and TipPct",
+      "rules": 2,
+      "usable_rows": 784196,
+      "pct_of_trips": 99.64
+    },
+    {
+      "measure": "total",
+      "meaning": "TotalAmount, and the revenue summed from it",
+      "rules": 3,
+      "usable_rows": 784166,
+      "pct_of_trips": 99.63
+    },
+    {
+      "measure": "fee_breakdown",
+      "meaning": "the individual surcharge columns, itemised",
+      "rules": 2,
+      "usable_rows": 669800,
+      "pct_of_trips": 85.1
+    },
+    {
+      "measure": "passengers",
+      "meaning": "PassengerCount",
+      "rules": 1,
+      "usable_rows": 725304,
+      "pct_of_trips": 92.15
+    },
+    {
+      "measure": "(all rules)",
+      "meaning": "the blunt filter: no rule fired anywhere on the row",
+      "rules": 14,
+      "usable_rows": 598358,
+      "pct_of_trips": 76.02
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+services:
+  iris:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: taxi-insights-iris
+    restart: unless-stopped
+    ports:
+      # Host ports are offset by one from the IRIS defaults (1972 / 52773)
+      # because another IRIS container on this machine already holds those.
+      # Change both sides of the colon together if you want the defaults back;
+      # the host half is what .env must agree with.
+      - "1973:1972"     # superserver: Python DB-API, Native API, JDBC, ODBC
+      - "52774:52773"   # web: Management Portal and REST
+    volumes:
+      # Read-only. IRIS only ever *reads* these, during server-side LOAD DATA.
+      # Inside the container they appear as /data/<name>.csv, which is the path
+      # LOAD DATA statements must use -- not the host path.
+      - ./data:/data:ro
+      # Writable scratch, for anything we ask IRIS to export back out.
+      - ./iris_out:/output

@@ -106,21 +106,6 @@ def scalar(sql: str, params: Sequence[Any] = (), cfg: Optional[IrisConfig] = Non
     return rows[0][0] if rows else None
 
 
-def schema_exists(name: str, cfg: Optional[IrisConfig] = None) -> bool:
-    """Whether a schema is already defined in this namespace.
-
-    IRIS has no ``CREATE SCHEMA IF NOT EXISTS``: a second CREATE SCHEMA fails
-    with ``SQLCODE -476, Schema already exists``, which would abort the rest of
-    a DDL batch. So the check happens here instead.
-    """
-    found = scalar(
-        "SELECT COUNT(*) FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME = ?",
-        (name,),
-        cfg,
-    )
-    return bool(found)
-
-
 def table_exists(qualified_name: str, cfg: Optional[IrisConfig] = None) -> bool:
     schema, _, table = qualified_name.partition(".")
     found = scalar(

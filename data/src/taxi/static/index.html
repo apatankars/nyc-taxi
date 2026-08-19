@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NYC Green Taxi 2023 &middot; IRIS insights</title>
+<link rel="stylesheet" href="/static/styles.css">
+</head>
+
+<!-- data-palette / data-mode let the data-viz validator run in-browser against
+     the exact hexes this page ships. Load the page with ?validate=1 and the six
+     checks print to the console as a table. -->
+<body data-palette="#2a78d6,#eb6834" data-mode="light" data-surface="#ffffff">
+
+<header class="top">
+  <div>
+    <!-- <h1>NYC Green Taxi &middot; 2023</h1> -->
+    <!-- <div class="sub">787,060 trips, aggregated in InterSystems IRIS</div> -->
+  </div>
+</header>
+
+<nav class="tabs" role="tablist" id="tabs">
+  <button role="tab" data-tab="overview"  aria-selected="true">Overview</button>
+  <button role="tab" data-tab="quality"   aria-selected="false">Trip quality</button>
+  <button role="tab" data-tab="zones"     aria-selected="false">Zones</button>
+  <button role="tab" data-tab="time"      aria-selected="false">Time</button>
+  <button role="tab" data-tab="pairs"     aria-selected="false">Routes</button>
+  <button role="tab" data-tab="browse"    aria-selected="false">Rows</button>
+  <button role="tab" data-tab="bench"     aria-selected="false">IRIS vs Python</button>
+</nav>
+
+<main>
+  <section class="panel" id="panel-overview" role="tabpanel">
+    <div id="overview-body"><p class="status-msg">Loading&hellip;</p></div>
+  </section>
+
+  <section class="panel" id="panel-quality" role="tabpanel" hidden>
+    <p class="prose">Fourteen rules, run across the whole table in IRIS. Pick a rule to see the rows it caught.</p>
+    <div id="quality-body"><p class="status-msg">Loading&hellip;</p></div>
+  </section>
+
+  <section class="panel" id="panel-zones" role="tabpanel" hidden>
+    <div class="controls">
+      <label><input type="checkbox" id="zones-clean" checked> Exclude rows flagged for these figures</label>
+      <span class="note">Uncheck to include flagged rows.</span>
+    </div>
+    <div id="zones-body"><p class="status-msg">Loading&hellip;</p></div>
+  </section>
+
+  <section class="panel" id="panel-time" role="tabpanel" hidden>
+    <div class="controls">
+      <label><input type="checkbox" id="time-clean" checked> Exclude rows flagged for these figures</label>
+      <span class="note">Uncheck to include flagged rows.</span>
+    </div>
+    <div id="time-body"><p class="status-msg">Loading&hellip;</p></div>
+  </section>
+
+  <section class="panel" id="panel-pairs" role="tabpanel" hidden>
+    <div class="controls">
+      <label><input type="checkbox" id="pairs-clean" checked> Exclude rows flagged for these figures</label>
+      <label><input type="checkbox" id="pairs-cross"> Cross-borough journeys only</label>
+    </div>
+    <div id="pairs-body"><p class="status-msg">Loading&hellip;</p></div>
+  </section>
+
+  <section class="panel" id="panel-browse" role="tabpanel" hidden>
+    <div class="controls">
+      <label for="browse-rule">Show</label>
+      <select id="browse-rule">
+        <option value="flagged" selected>Flagged rows (any rule)</option>
+        <option value="all">All rows</option>
+        <option value="clean">Rows that passed everything</option>
+      </select>
+      <label for="browse-limit">Rows</label>
+      <select id="browse-limit">
+        <option value="25" selected>25</option>
+        <option value="50">50</option>
+        <option value="100">100</option>
+      </select>
+      <span class="note">The one view that reads trip rows rather than group counts.</span>
+    </div>
+    <div id="browse-body"><p class="status-msg">Loading&hellip;</p></div>
+  </section>
+
+  <section class="panel" id="panel-bench" role="tabpanel" hidden>
+    <p class="prose">
+      Each question is answered twice: once inside IRIS, and once by pulling
+      every trip into pandas. Both answers are asserted equal before either
+      timing is reported. Three of the questions are <kbd>GROUP BY</kbd> in
+      IRIS; the fourth is not an aggregate, so its IRIS side is a Python
+      function compiled into the server and called once per trip.
+    </p>
+    <div class="controls">
+      <button id="bench-run">Re-run the comparison</button>
+      <span class="note">Starts automatically on page load; takes a few seconds.</span>
+    </div>
+    <div id="bench-body"><p class="status-msg">Loading&hellip;</p></div>
+  </section>
+</main>
+
+<div class="tooltip" id="tooltip" role="status" aria-live="polite"></div>
+
+<!-- Expanded figures are moved into this overlay and moved back on close, so a
+     chart keeps its state and its ResizeObserver across the trip. -->
+<div class="overlay" id="overlay" hidden></div>
+
+<script src="/static/app.js"></script>
+<script>
+  // Reproducible palette check, since this machine has no JS runtime for the CLI.
+  if (new URLSearchParams(location.search).has("validate")) {
+    import("/static/validate_palette.js");
+  }
+</script>
+</body>
+</html>

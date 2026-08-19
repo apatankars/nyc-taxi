@@ -1,0 +1,688 @@
+/* Design tokens.
+ *
+ * Every *data* colour below is taken verbatim from the data-viz reference palette
+ * -- categorical slots 1 and 2 (blue, orange), the blue sequential ramp for the
+ * heatmap, and the fixed status palette for rule severity. No series or ramp step
+ * is a hand-picked hex.
+ *
+ * The chrome and ink roles are plain neutral greys on pure white. Both planes are
+ * the same #fff -- a card is told apart from the page by its 1px border alone, not
+ * by a tint -- and the surface is repeated on <body data-surface> so the validator
+ * scores the series against the surface they actually sit on rather than against
+ * its own #fcfcfb default. White is the most forgiving surface there is for the
+ * mark-vs-surface check: slot 2 (orange) clears the 3:1 floor at 3.20:1 here,
+ * its best of any surface this page has had.
+ *
+ * Ink is one step darker than the reference's greys: muted carries 11.5px axis
+ * ticks and table headers, and at the documented value it read 3.6:1 on white --
+ * under 4.5:1 for text that small. 5.3:1 here.
+ *
+ * No chart uses more than two categorical series, so only slots 1-2 are defined;
+ * that pair is the validated leading pair of the default order. This page is
+ * light-surface only: `color-scheme: light` pins the form controls too, so the
+ * OS dark setting cannot repaint the checkboxes out from under the palette.
+ */
+
+:root {
+  color-scheme: light only;
+
+  --surface-1: #ffffff;          /* chart surface */
+  --page: #ffffff;               /* page plane */
+  --ink-primary: #111111;
+  --ink-secondary: #515151;
+  --ink-muted: #6b6b6b;          /* axis ticks, small labels */
+  --grid: #e4e4e4;               /* hairline gridline */
+  --axis: #c2c2c2;               /* baseline */
+  --border: rgba(0, 0, 0, 0.13);
+  --hover-wash: rgba(0, 0, 0, 0.04);
+
+  --series-1: #2a78d6;           /* categorical slot 1, blue */
+  --series-2: #eb6834;           /* categorical slot 2, orange */
+
+  --seq-100: #cde2fb;
+  --seq-200: #9ec5f4;
+  --seq-300: #6da7ec;
+  --seq-400: #3987e5;
+  --seq-500: #256abf;
+  --seq-600: #184f95;
+  --seq-700: #0d366b;
+
+  /* The heatmap's sequential scale, as seven ordered steps of the one blue hue.
+   * Near-zero must recede *toward the surface*, so on this light surface step 1
+   * is the lightest blue and step 7 the darkest. */
+  --ramp-1: var(--seq-100);
+  --ramp-2: var(--seq-200);
+  --ramp-3: var(--seq-300);
+  --ramp-4: var(--seq-400);
+  --ramp-5: var(--seq-500);
+  --ramp-6: var(--seq-600);
+  --ramp-7: var(--seq-700);
+
+  /* Status is fixed -- never themed, never reused as a series colour. */
+  --status-good: #0ca30c;
+  --status-warning: #fab219;
+  --status-serious: #ec835a;
+  --status-critical: #d03b3b;
+
+  /* The wash behind a cell a quality rule actually read: --status-warning at 22%.
+   * It points, it does not grade -- see table.data td.tested. */
+  --flag-wash: rgba(250, 178, 25, 0.22);
+
+  /* Near-square corners: a 2px radius takes the machined edge off a border
+   * without reading as a rounded card. */
+  --radius: 2px;
+
+  /* Calibri, and humanist sans-serifs behind it -- Candara and Segoe UI are the
+   * same family of shapes and ship alongside it on Windows, Lucida Grande is the
+   * closest thing installed by default on a Mac without Office. `system-ui` is
+   * deliberately NOT in this list: it is what the page looked like before, and
+   * putting it first would mean most readers never saw Calibri at all.
+   *
+   * Numeric rules below all ask for `lining-nums`: Calibri's default figures are
+   * old-style, so a column of digits hops above and below the x-height unless the
+   * lining set is requested by name. */
+  --sans: Calibri, Candara, "Segoe UI", "Lucida Grande", Ubuntu, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  /* The content column, and the side padding that centres it. The header bar and
+   * the tab bar stay full-bleed -- only their *contents* are inset -- so the
+   * title, the tabs and the first figure all share one left edge at any width,
+   * and on a wide monitor the page sits in the middle instead of hugging the
+   * left. Below 1240 + 48 the gutter bottoms out at 24px and nothing is cropped. */
+  --content: 1240px;
+  --gutter: max(24px, calc((100% - var(--content)) / 2));
+}
+
+/* -------------------------------------------------------------- shell */
+
+* { box-sizing: border-box; }
+
+/* Calibri sets noticeably smaller than system-ui at the same px -- narrower, with
+ * a lower x-height -- so the body steps up from 14px to 15px to land on the same
+ * apparent size, and the line-height opens a little to match. */
+body {
+  margin: 0;
+  font-family: var(--sans);
+  background: var(--page);
+  color: var(--ink-primary);
+  font-size: 15px;
+  line-height: 1.55;
+  font-variant-numeric: lining-nums;
+  -webkit-font-smoothing: antialiased;
+}
+
+header.top {
+  display: flex;
+  align-items: baseline;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 20px var(--gutter) 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-1);
+}
+
+/* Weights are 400/600/700 throughout: Calibri ships Regular and Bold only, so the
+ * old 650 and 680 were snapped to one of them or synthesised anyway -- naming the
+ * weight the font actually has is what gets drawn. The negative letter-spacing is
+ * gone too: it was tightening an already-narrow face into itself. */
+header.top h1 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 700;
+}
+
+header.top .sub {
+  color: var(--ink-secondary);
+  font-size: 14px;
+}
+
+header.top .spacer { flex: 1 1 auto; }
+
+button {
+  font: inherit;
+  color: var(--ink-primary);
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 5px 11px;
+  cursor: pointer;
+}
+
+button:hover { background: var(--hover-wash); }
+button:focus-visible { outline: 2px solid var(--series-1); outline-offset: 2px; }
+button[disabled] { opacity: 0.5; cursor: default; }
+
+/* -------------------------------------------------------------- tabs */
+
+nav.tabs {
+  display: flex;
+  gap: 2px;
+  padding: 0 var(--gutter);
+  background: var(--surface-1);
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+}
+
+nav.tabs button {
+  border: none;
+  border-radius: 0;
+  background: none;
+  padding: 10px 14px;
+  color: var(--ink-secondary);
+  border-bottom: 2px solid transparent;
+  white-space: nowrap;
+}
+
+nav.tabs button[aria-selected="true"] {
+  color: var(--ink-primary);
+  font-weight: 600;
+  border-bottom-color: var(--series-1);
+}
+
+/* -------------------------------------------------------------- layout */
+
+main { padding: 20px var(--gutter) 64px; }
+
+.panel[hidden] { display: none; }
+
+.controls {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 18px;
+  padding: 10px 14px;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.controls label {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--ink-secondary);
+  cursor: pointer;
+}
+
+.controls .note { color: var(--ink-muted); font-size: 13px; }
+
+.controls select {
+  font: inherit;
+  color: var(--ink-primary);
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 4px 8px;
+  cursor: pointer;
+}
+
+.controls select:focus-visible { outline: 2px solid var(--series-1); outline-offset: 2px; }
+
+.grid {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  margin-bottom: 16px;
+}
+
+.grid.thirds { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+
+.full { grid-column: 1 / -1; }
+
+/* -------------------------------------------------------------- figures */
+
+figure.card {
+  margin: 0;
+  padding: 14px 16px 12px;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  min-width: 0;
+}
+
+figure.card figcaption { margin-bottom: 2px; }
+
+figure.card .title {
+  font-size: 15px;
+  font-weight: 700;
+}
+
+figure.card .subtitle {
+  font-size: 13px;
+  color: var(--ink-secondary);
+  margin-top: 1px;
+}
+
+.legend {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin: 8px 0 2px;
+  font-size: 13px;
+  color: var(--ink-secondary);
+}
+
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+
+.legend i {
+  width: 10px;
+  height: 10px;
+  background: var(--series-1);
+  flex: none;
+}
+
+.plot { margin-top: 8px; }
+.plot svg { display: block; width: 100%; height: auto; overflow: visible; }
+
+.fig-foot {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  row-gap: 6px;                  /* after the shorthand, or it is overwritten */
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--grid);
+  font-size: 13px;
+  color: var(--ink-muted);
+}
+
+/* The buttons travel together and are pushed right by their own auto margin
+ * rather than by a flex spacer: a growing spacer plus wrapping puts the buttons
+ * on a line of their own even when they would have fitted beside the note. */
+.fig-actions {
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.fig-foot .note-text { min-width: 0; }
+
+.fig-foot button {
+  font-size: 13px;
+  padding: 3px 9px;
+  color: var(--ink-secondary);
+  white-space: nowrap;
+}
+
+/* -------------------------------------------------------------- expanded */
+
+/* The expanded figure is the *same* card node, moved into this overlay and moved
+ * back on close. That is why the chart keeps working: its ResizeObserver is still
+ * attached, so the new width redraws it, and app.js hands it a new height to
+ * match -- an expanded chart is re-laid-out, not scaled up. */
+.overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.34);
+}
+
+.overlay[hidden] { display: none; }
+
+figure.card.expanded {
+  width: min(1180px, 100%);
+  max-height: calc(100vh - 48px);
+  overflow: auto;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.22);
+}
+
+/* Leaves the grid cell the width it had, so the page behind does not reflow. */
+.card-slot { min-width: 0; }
+
+body.modal-open { overflow: hidden; }
+
+/* -------------------------------------------------------------- svg roles */
+
+.gridline { stroke: var(--grid); stroke-width: 1; shape-rendering: crispEdges; }
+.baseline { stroke: var(--axis); stroke-width: 1; shape-rendering: crispEdges; }
+
+/* SVG text inherits the page font. Axis ticks and data labels stay a step below the
+ * body size and ask for lining figures explicitly -- in Calibri's default old-style
+ * set, a tick reading 10, 20, 30 wanders off the baseline it is labelling. */
+.tick {
+  fill: var(--ink-muted);
+  font-size: 11.5px;
+  font-variant-numeric: lining-nums tabular-nums;
+}
+
+.datalabel {
+  fill: var(--ink-secondary);
+  font-size: 11.5px;
+  font-weight: 600;
+  font-variant-numeric: lining-nums tabular-nums;
+}
+
+.axis-title { fill: var(--ink-muted); font-size: 11.5px; }
+
+.mark { transition: opacity 120ms ease; }
+.plot:hover .mark { opacity: 0.55; }
+.plot:hover .mark.active { opacity: 1; }
+.crosshair { stroke: var(--axis); stroke-width: 1; pointer-events: none; }
+
+.marker {
+  stroke: var(--surface-1);      /* 2px surface ring on overlapping marks */
+  stroke-width: 2;
+}
+
+.cell { stroke: var(--surface-1); stroke-width: 2; }
+
+/* --------------------------------------------------------- headline figures */
+
+/* One figure per column, three rows deep: labels, figures, basis. No card and no
+ * border box -- two rules and the shared baselines carry the structure, so the
+ * figures are the only heavy thing on the page above the charts. */
+/* Two classes, because .table-wrap sets a margin-top further down the file and
+ * this table is the first thing in the panel. */
+.table-wrap.stats-wrap { margin: 0 0 20px; }
+
+table.stats {
+  width: 100%;
+  border-collapse: collapse;
+  /* Equal columns, so the figures sit on a regular rhythm rather than at six
+   * distances set by how long each label happens to be. */
+  table-layout: fixed;
+  /* Below this the columns are narrower than the numbers in them, and the
+   * wrapper scrolls instead of wrapping "787,060" onto two lines. */
+  min-width: 820px;
+}
+
+table.stats th,
+table.stats td {
+  text-align: left;
+  padding: 0 24px 0 0;
+}
+
+table.stats th:last-child,
+table.stats td:last-child { padding-right: 0; }
+
+/* Small caps for the same reason as the table headers below -- a set label at
+ * 13.5px reads as a label without shrinking to 11px to earn it. Bottom-aligned,
+ * so a label that wraps to two lines still ends on the line above the figure
+ * rather than floating away from it. */
+table.stats thead th {
+  vertical-align: bottom;
+  padding-bottom: 9px;
+  font-size: 13.5px;
+  font-weight: 600;
+  font-variant-caps: all-small-caps;
+  letter-spacing: 0.02em;
+  line-height: 1.25;
+  color: var(--ink-muted);
+  border-bottom: 1px solid var(--border);
+}
+
+/* Tabular figures so the digits stack column-to-column across the row; lining
+ * figures so they sit level with the small caps above them. */
+table.stats tr.values td {
+  vertical-align: top;
+  padding-top: 12px;
+  font-size: clamp(22px, 2.2vw, 30px);
+  font-weight: 700;
+  line-height: 1.1;
+  font-variant-numeric: lining-nums tabular-nums;
+  white-space: nowrap;
+}
+
+table.stats tr.bases td {
+  vertical-align: top;
+  padding-top: 4px;
+  padding-bottom: 14px;
+  font-size: 12.5px;
+  line-height: 1.35;
+  color: var(--ink-secondary);
+  border-bottom: 1px solid var(--grid);
+}
+
+/* -------------------------------------------------------------- tables */
+
+.table-wrap { overflow-x: auto; margin-top: 10px; }
+
+table.data {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13.5px;
+}
+
+/* Padding is symmetric so that a shaded cell is centred on the value it shades.
+ * With the gap all on one side, the wash started flush against the digits and ran
+ * 10px past them into the next column, so every highlight looked a column-gap out
+ * of step with the header above it. The outer edges keep their zero padding, so
+ * the table still starts and ends on the card's own margins. */
+table.data th,
+table.data td {
+  text-align: left;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--grid);
+  white-space: nowrap;
+}
+
+table.data th:first-child,
+table.data td:first-child { padding-left: 0; }
+
+table.data th:last-child,
+table.data td:last-child { padding-right: 0; }
+
+/* Small caps rather than uppercase-plus-letter-spacing. Calibri and Candara both
+ * cut real small capitals, so the header can be set rather than faked by
+ * tracking out an uppercase line; on a fallback face without them the browser
+ * synthesises, which still reads closer than spaced-out uppercase. At 13px they
+ * read as a header without having to shrink to 11px to earn it. */
+table.data th {
+  color: var(--ink-muted);
+  font-weight: 600;
+  font-size: 13px;
+  font-variant-caps: all-small-caps;
+  letter-spacing: 0.02em;
+  position: sticky;
+  top: 0;
+  background: var(--surface-1);
+}
+
+/* A numeric column is right-aligned in the body, so its header has to be too --
+ * otherwise the label sits over the left edge of a column of digits that ends at
+ * the right edge, and nothing lines up. */
+table.data th.num { text-align: right; }
+
+table.data td.num {
+  text-align: right;
+  font-variant-numeric: lining-nums tabular-nums;
+}
+
+/* The cell the rule that fired actually read. A pointer, not a status: the rules
+ * are named in the Flags column on the same row, so the wash is never the only
+ * thing carrying the meaning.
+ *
+ * The wash alone, with no rule or bar down one edge. An edge marker has to pick a
+ * side, and a 2px line on the left of a right-aligned number sits at the far end
+ * of the column from the digits it is meant to be pointing at -- it read as a
+ * table border that had come loose rather than as emphasis. */
+table.data td.tested { background: var(--flag-wash); }
+
+table.data tbody tr:hover { background: var(--hover-wash); }
+table.data tbody tr.clickable { cursor: pointer; }
+table.data tbody tr[aria-selected="true"] { background: var(--hover-wash); }
+
+/* -------------------------------------------------------------- ranked bars */
+
+.ranked { margin-top: 10px; }
+
+.ranked .row {
+  display: grid;
+  grid-template-columns: minmax(96px, 34%) 1fr auto;
+  align-items: center;
+  gap: 10px;
+  padding: 3px 0;
+}
+
+.ranked .row.clickable { cursor: pointer; }
+.ranked .row:hover { background: var(--hover-wash); }
+
+.ranked .name {
+  color: var(--ink-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ranked .track { height: 14px; }
+
+/* Square at both ends. A rounded data-end costs the bar a pixel or two of its own
+ * length at the exact place the reader is measuring it, and squaring it off is the
+ * more honest mark as well as the plainer one. */
+.ranked .bar {
+  height: 14px;                  /* thin mark, well under the 24px cap */
+  background: var(--series-1);
+  min-width: 2px;
+}
+
+.ranked .val {
+  font-variant-numeric: lining-nums tabular-nums;
+  color: var(--ink-secondary);
+  font-weight: 600;
+  min-width: 6ch;
+  text-align: right;
+}
+
+/* Status carries meaning only alongside its icon + word. */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--ink-secondary);
+  white-space: nowrap;
+}
+
+.chip .glyph { font-size: 11px; line-height: 1; }
+.chip.error .glyph { color: var(--status-critical); }
+.chip.warn .glyph { color: var(--status-warning); }
+
+/* -------------------------------------------------------------- misc */
+
+.tooltip {
+  position: fixed;
+  z-index: 50;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 90ms ease;
+  background: var(--surface-1);
+  color: var(--ink-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.16);
+  padding: 8px 10px;
+  font-size: 13px;
+  max-width: 280px;
+}
+
+.tooltip.on { opacity: 1; }
+.tooltip .t-title { font-weight: 700; margin-bottom: 3px; }
+
+.tooltip .t-row {
+  display: flex;
+  gap: 10px;
+  color: var(--ink-secondary);
+}
+
+.tooltip .t-row .v {
+  margin-left: auto;
+  font-variant-numeric: lining-nums tabular-nums;
+  color: var(--ink-primary);
+  font-weight: 600;
+}
+
+.prose {
+  color: var(--ink-secondary);
+  max-width: 78ch;
+  margin: 0 0 14px;
+}
+
+.prose strong { color: var(--ink-primary); }
+
+.status-msg { color: var(--ink-muted); padding: 12px 0; }
+.status-msg.bad { color: var(--status-critical); }
+
+.ramp-legend {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--ink-muted);
+  font-variant-numeric: lining-nums tabular-nums;
+}
+
+.ramp-legend .strip {
+  height: 8px;
+  width: 140px;
+  background: linear-gradient(
+    to right,
+    var(--ramp-1), var(--ramp-3), var(--ramp-5), var(--ramp-7)
+  );
+}
+
+kbd {
+  font-family: var(--mono);
+  font-size: 12px;
+  background: var(--hover-wash);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1px 5px;
+}
+
+/* Source shown as evidence rather than as decoration, so it gets no syntax
+ * highlighting: colour here is the same channel the charts use for data, and
+ * spending it on keywords would make a token look like a series. The page plane
+ * behind it is enough to separate it from the card. */
+.code-block { margin-top: 10px; }
+
+.code-block .code-label {
+  font-size: 12px;
+  color: var(--ink-muted);
+  margin-bottom: 4px;
+}
+
+.code-block pre {
+  margin: 0;
+  /* Tall enough for the whole CREATE FUNCTION statement, then scrolled. Cutting
+   * it shorter would hide the body, which is the only reason the block is here;
+   * leaving it uncapped would push the numbers it produced off the screen. */
+  max-height: 520px;
+  overflow: auto;
+  padding: 10px 12px;
+  background: var(--page);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.code-block code {
+  font-family: var(--mono);
+  /* 11.5px matches the axis ticks: this is reference material beside the figure,
+   * not body copy. */
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--ink-secondary);
+  /* `pre`, not `pre-wrap`, so the long CREATE line scrolls sideways rather than
+   * folding. The card exists to show the code exactly as deployed, and wrapped
+   * Python reads as different Python -- indentation is syntax here. */
+  white-space: pre;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; }
+}
+
+/* The texture channel: forced-colors and print lose the fills, so marks fall
+ * back to outlines and every figure keeps its table view reachable. */
+@media (forced-colors: active) {
+  .ranked .bar, .mark { forced-color-adjust: none; border: 1px solid CanvasText; }
+  /* The wash disappears here, so the pointer becomes the one thing
+   * forced-colors keeps: an outline. */
+  table.data td.tested { forced-color-adjust: none; outline: 2px solid CanvasText; }
+}

@@ -199,15 +199,8 @@ def _index_ddl() -> List[str]:
 
 
 def create_all(cfg: Optional[IrisConfig] = None, drop_existing: bool = True) -> None:
-    """(Re)create the schema and every table. Safe to run repeatedly."""
+    """(Re)create every table. Safe to run repeatedly."""
     statements: List[str] = []
-    # IRIS would create the Taxi schema implicitly with the first CREATE TABLE,
-    # but doing it explicitly means the schema exists before anything references
-    # it and that a fresh namespace fails here, loudly, rather than halfway
-    # through the DDL batch. Guarded because CREATE SCHEMA on an existing schema
-    # is SQLCODE -476, not a no-op -- there is no IF NOT EXISTS form.
-    if not db.schema_exists(SCHEMA, cfg):
-        statements.append(f"CREATE SCHEMA {SCHEMA}")
     if drop_existing:
         for table in (RAW_TRIPS, TRIPS, ZONES, f"{SCHEMA}.ZoneRaw", f"{SCHEMA}.TripReject"):
             statements.append(f"DROP TABLE IF EXISTS {table}")
